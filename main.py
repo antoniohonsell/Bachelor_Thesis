@@ -35,7 +35,7 @@ def seed_worker(worker_id: int):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seeds", nargs="+", type=int, default=list(range(10)))
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(range(1, 6)))
     parser.add_argument("--split_seed", type=int, default=50)   # fixed split across all runs
     parser.add_argument("--epochs", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=256)
