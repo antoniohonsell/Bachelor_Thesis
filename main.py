@@ -114,7 +114,7 @@ def main():
 
         model = resnet_arch.resnet_18_cifar()
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.SGD(model.parameters(), lr=args.lr)
+        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
         history = train_loop.train(
             model=model,
