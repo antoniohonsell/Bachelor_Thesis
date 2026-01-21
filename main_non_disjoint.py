@@ -10,8 +10,9 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import random_split
 
-import resnet18_arch
-import resnet20_arch
+import resnet18_arch_BatchNorm
+import resnet20_arch_BatchNorm
+import resnet20_arch_LayerNorm
 import train_loop
 import utils
 
@@ -45,10 +46,18 @@ def seed_worker(worker_id: int):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-def lr_lambda(epoch):
+def lr_lambda_10(epoch):
     if epoch < 80-1:
         return 1.0
     elif epoch < 120-1:
+        return 0.1
+    else:
+        return 0.01
+    
+def lr_lambda_100(epoch):
+    if epoch < 100-1:
+        return 1.0
+    elif epoch < 150-1:
         return 0.1
     else:
         return 0.01
@@ -131,9 +140,9 @@ def main():
     num_classes = 100 if args.dataset == "CIFAR100" else 10
 
     if args.model == "resnet18":
-        model = resnet18_arch.resnet_18_cifar(num_classes=num_classes)
+        model = resnet18_arch_BatchNorm.resnet_18_cifar(num_classes=num_classes)
     elif args.model == "resnet20":
-        model = resnet20_arch.resnet20(num_classes=num_classes)
+        model = resnet20_arch_LayerNorm.resnet20(num_classes=num_classes)
     else:
         raise ValueError(f"Unsupported model: {args.model}")
 
@@ -169,14 +178,37 @@ def main():
         )
 
         if args.model == "resnet18":
-            model = resnet18_arch.resnet_18_cifar(num_classes=num_classes)
+            model = resnet18_arch_BatchNorm.resnet_18_cifar(num_classes=num_classes)
         elif args.model == "resnet20":
-            model = resnet20_arch.resnet20(num_classes=num_classes)
+            model = resnet20_arch_LayerNorm.resnet20(num_classes=num_classes)
         else:
             raise ValueError(f"Unsupported model: {args.model}")
+
+        model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+        decay, no_decay = [], []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            # no weight decay for LayerNorm params and biases
+            if p.ndim == 1 or name.endswith(".bias") or "norm" in name or "ln" in name:
+                no_decay.append(p)
+            else:
+                decay.append(p)
+
+        optimizer = optim.SGD(
+            [
+                {"params": decay, "weight_decay": 5e-4},
+                {"params": no_decay, "weight_decay": 0.0},
+            ],
+            lr=args.lr,
+            momentum=0.9,
+        )
+
+        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_10 if args.epochs==128 else lr_lambda_100)
+
+
 
 
         history = train_loop.train(

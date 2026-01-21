@@ -17,9 +17,28 @@ __all__ = [
 
 
 def _weights_init(m):
-    """Initialization of CNN weights."""
-    if isinstance(m, (nn.Linear, nn.Conv2d)):
-        init.kaiming_normal_(m.weight)
+    # Convs: He init for ReLU networks (torchvision-style)
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+    # Linear head: either keep Kaiming or use Xavier; this is a reasonable default
+    elif isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+    # LayerNorm: gamma=1, beta=0
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.ones_(m.weight)
+        nn.init.zeros_(m.bias)
+
+    # If you use the LayerNorm2d wrapper, it contains an nn.LayerNorm as `m.ln`
+    elif isinstance(m, LayerNorm2d):
+        nn.init.ones_(m.ln.weight)
+        nn.init.zeros_(m.ln.bias)
+
 
 
 class LayerNorm2d(nn.Module):
@@ -114,6 +133,11 @@ class ResNet(nn.Module):
         self.linear = nn.Linear(64 * wm, num_classes)
 
         self.apply(_weights_init)
+        # Optional: start residual branch at ~0 so the block behaves like identity early on
+        for m in self.modules():
+            if isinstance(m, BasicBlock):
+                nn.init.zeros_(m.norm2.ln.weight)  # gamma of the last norm in the block
+
 
     def _make_layer(self, block, planes: int, num_blocks: int, stride: int):
         strides = [stride] + [1] * (num_blocks - 1)
