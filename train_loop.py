@@ -92,9 +92,11 @@ def train(
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-
             running_loss += loss.item() * inputs.size(0)
         t2 = time.time()
+
+        if scheduler is not None:
+                scheduler.step()
 
         train_loss = running_loss / train_size
         train_acc = get_train_accuracy(model, train_loader, device)
@@ -140,8 +142,6 @@ def train(
                 path,
             )
 
-        if scheduler is not None:
-            scheduler.step(epoch)
 
     # always save final checkpoint
     if save_dir is not None and save_last:

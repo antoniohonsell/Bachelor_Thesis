@@ -10,13 +10,13 @@ import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
 import metrics_platonic as metrics
-import resnet_arch
+import resnet18_arch
 import utils
 
 
 def load_resnet_from_ckpt(ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
-    model = resnet_arch.resnet_18_cifar()
+    model = resnet18_arch.resnet_18_cifar()
     model.load_state_dict(ckpt["state_dict"], strict=True)
     model.to(device).eval()
     return model

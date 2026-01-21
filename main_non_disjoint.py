@@ -46,9 +46,9 @@ def seed_worker(worker_id: int):
     random.seed(worker_seed)
 
 def lr_lambda(epoch):
-    if epoch < 80:
+    if epoch < 80-1:
         return 1.0
-    elif epoch < 120:
+    elif epoch < 120-1:
         return 0.1
     else:
         return 0.01
@@ -62,9 +62,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--num_workers", type=int, default=0)   # safer on macOS; increase on cluster
-    parser.add_argument("--out_dir", type=str, default="./runs_resnet18_cifar10")
+    parser.add_argument("--num_workers", type=int, default=0)   
+    parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
+    if args.out_dir is None:
+        args.out_dir = f"./runs_{args.model}_{args.dataset}"
 
     device = utils.get_device()
     os.makedirs(args.out_dir, exist_ok=True)
