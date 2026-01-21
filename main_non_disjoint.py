@@ -128,7 +128,7 @@ def main():
         pin_memory=(device.type == "cuda"),
     )
 
-    num_classes = 10 if args.dataset == "CIFAR10" else 100
+    num_classes = 100 if args.dataset == "CIFAR100" else 10
 
     if args.model == "resnet18":
         model = resnet18_arch.resnet_18_cifar(num_classes=num_classes)
@@ -169,9 +169,9 @@ def main():
         )
 
         if args.model == "resnet18":
-            model = resnet18_arch.resnet_18_cifar()
+            model = resnet18_arch.resnet_18_cifar(num_classes=num_classes)
         elif args.model == "resnet20":
-            model = resnet20_arch.resnet20()
+            model = resnet20_arch.resnet20(num_classes=num_classes)
         else:
             raise ValueError(f"Unsupported model: {args.model}")
         criterion = nn.CrossEntropyLoss()
