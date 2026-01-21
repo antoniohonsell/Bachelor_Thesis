@@ -1,3 +1,4 @@
+from html import parser
 import os
 import argparse
 
@@ -10,16 +11,34 @@ import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
 import metrics_platonic as metrics
-import resnet18_arch
+import resnet20_arch_LayerNorm
 import utils
 
 
-def load_resnet_from_ckpt(ckpt_path: str, device: torch.device):
+DATASET_STATS = {
+    "CIFAR10": {
+        "mean": (0.49139968, 0.48215841, 0.44653091),
+        "std":  (0.24703223, 0.24348513, 0.26158784),
+    },
+    "CIFAR100": {
+        "mean": (0.50707516, 0.48654887, 0.44091784),
+        "std":  (0.26733429, 0.25643846, 0.27615047),
+    },
+}
+
+def load_resnet_from_ckpt(ckpt_path: str, device: torch.device, num_classes: int):
     ckpt = torch.load(ckpt_path, map_location=device)
-    model = resnet18_arch.resnet_18_cifar()
-    model.load_state_dict(ckpt["state_dict"], strict=True)
+    model = resnet20_arch_LayerNorm.resnet20(num_classes=num_classes)
+
+    # If the checkpoint was saved under DataParallel, keys may be prefixed with 'module.'
+    state_dict = ckpt["state_dict"]
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict, strict=True)
     model.to(device).eval()
     return model
+
 
 
 def build_cifar_loader(
@@ -29,24 +48,33 @@ def build_cifar_loader(
     batch_size: int,
     num_workers: int,
     data_root: str = "./data",
+    dataset: str = "CIFAR10",
 ):
-    # deterministic transform (do NOT use train-time random aug for representation comparison)
+        # deterministic transform (do NOT use train-time random aug for representation comparison)
+    if dataset not in DATASET_STATS:
+        raise ValueError(f"Unsupported dataset: {dataset}")
+    stats = DATASET_STATS[dataset]
     tfm = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.49139968, 0.48215841, 0.44653091),
-                             (0.24703223, 0.24348513, 0.26158784)),
+        transforms.Normalize(stats["mean"], stats["std"]),
     ])
 
+    if dataset == "CIFAR10":
+        DS = torchvision.datasets.CIFAR10
+    elif dataset == "CIFAR100":
+        DS = torchvision.datasets.CIFAR100
+
     if split == "test":
-        ds = torchvision.datasets.CIFAR10(root=data_root, train=False, download=True, transform=tfm)
+        ds = DS(root=data_root, train=False, download=True, transform=tfm)
     elif split in ("train", "val"):
-        full = torchvision.datasets.CIFAR10(root=data_root, train=True, download=True, transform=tfm)
-        split_path = os.path.join(runs_dir, f"split_indices_seed{split_seed}.pt")
+        full = DS(root=data_root, train=True, download=True, transform=tfm)
+        split_path = os.path.join(runs_dir, f"split_indices_{dataset}_seed{split_seed}.pt")
         idx = torch.load(split_path)
         indices = idx["train_indices"] if split == "train" else idx["val_indices"]
         ds = Subset(full, indices)
     else:
         raise ValueError(f"Unknown split: {split}")
+
 
     return DataLoader(
         ds,
@@ -168,13 +196,16 @@ def layerwise_scores(
 def main():
     parser = argparse.ArgumentParser()
 
+    # Dataset
+    parser.add_argument("--dataset", type=str, default="CIFAR10")
+
     # Provide either explicit checkpoints OR seeds + runs_dir + which
     parser.add_argument("--ckpt_a", type=str, default=None)
     parser.add_argument("--ckpt_b", type=str, default=None)
     parser.add_argument("--seed_a", type=int, default=None)
     parser.add_argument("--seed_b", type=int, default=None)
 
-    parser.add_argument("--runs_dir", type=str, default="./runs_resnet18_cifar10")
+    parser.add_argument("--runs_dir", type=str, default="./runs_resnet20_CIFAR10")
     parser.add_argument("--which", type=str, default="best", choices=["best", "final"])
 
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
@@ -184,7 +215,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--max_samples", type=int, default=None)
 
-    parser.add_argument("--layers", nargs="+", default=["layer1", "layer2", "layer3", "layer4", "avgpool"])
+    parser.add_argument("--layers", nargs="+", default=["norm1", "layer1", "layer2", "layer3", "linear"])
     parser.add_argument("--pool", type=str, default="avg", choices=["avg", "flatten"])
 
     parser.add_argument("--metric", type=str, default="mutual_knn",
@@ -207,7 +238,7 @@ def main():
 
         def ckpt_from_seed(seed: int):
             run_dir = os.path.join(args.runs_dir, f"seed_{seed}")
-            fname = f"resnet18_cifar10_seed{seed}_{args.which}.pth"
+            fname = f"resnet20_{args.dataset}_seed{seed}_{args.which}.pth"
             return os.path.join(run_dir, fname)
 
         ckpt_a = ckpt_from_seed(args.seed_a)
@@ -225,11 +256,20 @@ def main():
         split_seed=args.split_seed,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        dataset=args.dataset,
     )
 
     # Models
-    model_a = load_resnet_from_ckpt(ckpt_a, device=device)
-    model_b = load_resnet_from_ckpt(ckpt_b, device=device)
+    if args.dataset == "CIFAR10":
+        num_classes = 10
+    elif args.dataset == "CIFAR100":
+        num_classes = 100
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+    model_a = load_resnet_from_ckpt(ckpt_a, device=device, num_classes=num_classes)
+    model_b = load_resnet_from_ckpt(ckpt_b, device=device, num_classes=num_classes)
+
 
     # Features
     feats_a = extract_layer_features(model_a, loader, device, layers=args.layers,
