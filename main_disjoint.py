@@ -7,19 +7,30 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import Subset
 
-import resnet18_arch
+import resnet18_arch_BatchNorm
+import resnet20_arch_BatchNorm
+import resnet20_arch_LayerNorm
 import train_loop
 import utils
 
 
-"""
-how to run :
-python main_diff_split.py --seeds 7
-"""
+DATASET_STATS = {
+    "CIFAR10": {
+        "mean": (0.49139968, 0.48215841, 0.44653091),
+        "std":  (0.24703223, 0.24348513, 0.26158784),
+        "num_classes": 10,
+    },
+    "CIFAR100": {
+        "mean": (0.50707516, 0.48654887, 0.44091784),
+        "std":  (0.26733429, 0.25643846, 0.27615047),
+        "num_classes": 100,
+    },
+}
 
 
 def set_seed(seed: int):
@@ -41,7 +52,17 @@ def seed_worker(worker_id: int):
     random.seed(worker_seed)
 
 
-def stratified_train_val_split(targets, val_size: int, seed: int, num_classes: int = 10):
+def lr_lambda(epoch: int):
+    # Same schedule as main_non_disjoint.py (CIFAR-style step drops)
+    if epoch < 80 - 1:
+        return 1.0
+    elif epoch < 120 - 1:
+        return 0.1
+    else:
+        return 0.01
+
+
+def stratified_train_val_split(targets, val_size: int, seed: int, num_classes: int):
     """
     Deterministic stratified split: val gets ~val_size samples total, balanced across classes.
     Returns: (train_indices, val_indices) indices into the full train dataset.
@@ -71,7 +92,7 @@ def stratified_train_val_split(targets, val_size: int, seed: int, num_classes: i
     return train_indices, val_indices
 
 
-def split_train_into_two_balanced_subsets(train_indices, targets, seed: int, num_classes: int = 10):
+def split_train_into_two_balanced_subsets(train_indices, targets, seed: int, num_classes: int):
     """
     Given train_indices into the full dataset, return two disjoint balanced subsets A/B.
     Balanced means: each subset has the same number per class, and classes are equally represented.
@@ -100,61 +121,112 @@ def split_train_into_two_balanced_subsets(train_indices, targets, seed: int, num
 
     rng.shuffle(subset_a)
     rng.shuffle(subset_b)
-    return subset_a, subset_b, {"per_class_used": half, "dropped_per_class": {c: len(per_class[c]) - k for c in range(num_classes)}}
+    return subset_a, subset_b, {
+        "per_class_used": half,
+        "dropped_per_class": {c: len(per_class[c]) - k for c in range(num_classes)},
+    }
 
 
-def class_counts(indices, targets, num_classes: int = 10):
+def class_counts(indices, targets, num_classes: int):
     targets = np.asarray(targets)
     ctr = Counter(targets[np.asarray(indices)].tolist())
     return [ctr.get(c, 0) for c in range(num_classes)]
 
 
+def build_model(model_name: str, num_classes: int):
+    if model_name == "resnet18":
+        return resnet18_arch_BatchNorm.resnet_18_cifar(num_classes=num_classes)
+    if model_name == "resnet20":
+        # Keep parity with main_non_disjoint.py (LayerNorm variant)
+        return resnet20_arch_LayerNorm.resnet20(num_classes=num_classes)
+        # If you want BatchNorm ResNet20 instead, swap to:
+        # return resnet20_arch_BatchNorm.resnet20(num_classes=num_classes)
+    raise ValueError(f"Unsupported model: {model_name}")
+
+
+def build_optimizer(model: torch.nn.Module, lr: float):
+    """Match main_non_disjoint.py: no weight decay for 1D params (bias/norm scale)."""
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # no weight decay for normalization params and biases
+        if p.ndim == 1 or name.endswith(".bias") or "norm" in name or "bn" in name or "ln" in name:
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    return optim.SGD(
+        [
+            {"params": decay, "weight_decay": 5e-4},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=lr,
+        momentum=0.9,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seeds", nargs="+", type=int, default=[7])  # default one run; add more if you want
-    parser.add_argument("--split_seed", type=int, default=50)         # fixed train/val split across all runs
-    parser.add_argument("--subset_seed", type=int, default=None)      # fixed A/B membership; default = split_seed
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--dataset", type=str, default="CIFAR10")
+    parser.add_argument("--model", type=str, default="resnet20")
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(range(0, 2)))
+    parser.add_argument("--split_seed", type=int, default=50)        # fixed train/val split across all runs
+    parser.add_argument("--subset_seed", type=int, default=None)     # fixed A/B membership; default = split_seed
+    parser.add_argument("--epochs", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--out_dir", type=str, default="./runs_resnet18_cifar10_two_subsets")
+    parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--val_size", type=int, default=5000)
     args = parser.parse_args()
+
+    if args.dataset not in DATASET_STATS:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+    stats = DATASET_STATS[args.dataset]
 
     if args.subset_seed is None:
         args.subset_seed = args.split_seed
 
+    if args.out_dir is None:
+        args.out_dir = f"./runs_{args.model}_{args.dataset}_disjoint"
+
     device = utils.get_device()
     os.makedirs(args.out_dir, exist_ok=True)
+
+    normalize = transforms.Normalize(stats["mean"], stats["std"])
 
     train_transform = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.49139968, 0.48215841, 0.44653091),
-                             (0.24703223, 0.24348513, 0.26158784)),
+        normalize,
     ])
 
-    eval_transform = transforms.Compose([
+    test_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.49139968, 0.48215841, 0.44653091),
-                             (0.24703223, 0.24348513, 0.26158784)),
+        normalize,
     ])
 
     # Use separate dataset objects so validation has no augmentation
-    train_full = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=train_transform)
-    eval_full  = torchvision.datasets.CIFAR10(root="./data", train=True, download=False, transform=eval_transform)
-    test_ds    = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=eval_transform)
+    if args.dataset == "CIFAR10":
+        train_full = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=train_transform)
+        eval_full = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=test_transform)
+        test_ds = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=test_transform)
+    else:  # CIFAR100
+        train_full = torchvision.datasets.CIFAR100(root="./data", train=True, download=True, transform=train_transform)
+        eval_full = torchvision.datasets.CIFAR100(root="./data", train=True, download=True, transform=test_transform)
+        test_ds = torchvision.datasets.CIFAR100(root="./data", train=False, download=True, transform=test_transform)
 
     targets = train_full.targets  # length 50k
+    num_classes = stats["num_classes"]
 
     # Stratified train/val split (balanced per class)
     train_indices, val_indices = stratified_train_val_split(
         targets=targets,
         val_size=args.val_size,
         seed=args.split_seed,
-        num_classes=10
+        num_classes=num_classes,
     )
 
     # Two disjoint balanced subsets of the TRAIN indices
@@ -162,17 +234,18 @@ def main():
         train_indices=train_indices,
         targets=targets,
         seed=args.subset_seed,
-        num_classes=10
+        num_classes=num_classes,
     )
 
     # Save split indices for reproducibility
     split_path = os.path.join(
         args.out_dir,
-        f"indices_splitseed{args.split_seed}_subsetseed{args.subset_seed}_val{args.val_size}.pt"
+        f"indices_{args.dataset}_splitseed{args.split_seed}_subsetseed{args.subset_seed}_val{args.val_size}.pt",
     )
     if not os.path.exists(split_path):
         torch.save(
             {
+                "dataset": args.dataset,
                 "split_seed": args.split_seed,
                 "subset_seed": args.subset_seed,
                 "val_size": args.val_size,
@@ -182,24 +255,28 @@ def main():
                 "subset_b_indices": subset_b_idx,
                 "subset_meta": subset_meta,
             },
-            split_path
+            split_path,
         )
 
     # Build datasets
     subset_a = Subset(train_full, subset_a_idx)
     subset_b = Subset(train_full, subset_b_idx)
-    val_ds   = Subset(eval_full, val_indices)
+    val_ds = Subset(eval_full, val_indices)
 
     # Sanity prints (class-balanced?)
-    a_counts = class_counts(subset_a_idx, targets)
-    b_counts = class_counts(subset_b_idx, targets)
-    v_counts = class_counts(val_indices, targets)
+    a_counts = class_counts(subset_a_idx, targets, num_classes=num_classes)
+    b_counts = class_counts(subset_b_idx, targets, num_classes=num_classes)
+    v_counts = class_counts(val_indices, targets, num_classes=num_classes)
     print("Subset A per-class counts:", a_counts)
     print("Subset B per-class counts:", b_counts)
     print("Val     per-class counts:", v_counts)
-    print(f"Subset A size: {len(subset_a_idx)} | Subset B size: {len(subset_b_idx)} | Val size: {len(val_indices)}")
+    print(
+        f"Subset A size: {len(subset_a_idx)} | "
+        f"Subset B size: {len(subset_b_idx)} | "
+        f"Val size: {len(val_indices)}"
+    )
 
-    # Test loader never shuffled
+    # Test loader never shuffled (created for parity with main_non_disjoint.py)
     test_loader = torch.utils.data.DataLoader(
         test_ds,
         batch_size=args.batch_size,
@@ -218,93 +295,67 @@ def main():
     )
 
     for seed in args.seeds:
-        print(f"\n==============================\nRunning base seed = {seed}\n==============================")
+        print(f"\n==============================\nRunning seed = {seed}\n==============================")
 
         run_dir = os.path.join(args.out_dir, f"seed_{seed}")
         os.makedirs(run_dir, exist_ok=True)
 
-        # Train model on subset A
-        modelA_dir = os.path.join(run_dir, "subset_A")
-        os.makedirs(modelA_dir, exist_ok=True)
+        for subset_name, subset_ds, model_offset in [
+            ("A", subset_a, 1),
+            ("B", subset_b, 2),
+        ]:
+            model_dir = os.path.join(run_dir, f"subset_{subset_name}")
+            os.makedirs(model_dir, exist_ok=True)
 
-        # Use a deterministic but distinct seed stream per model
-        seedA = seed * 1000 + 1
-        set_seed(seedA)
-        gA = torch.Generator().manual_seed(seedA)
+            # Deterministic but distinct seed stream per model
+            model_seed = seed * 1000 + model_offset
+            set_seed(model_seed)
+            g_loader = torch.Generator().manual_seed(model_seed)
 
-        train_loader_A = torch.utils.data.DataLoader(
-            subset_a,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            worker_init_fn=seed_worker if args.num_workers > 0 else None,
-            generator=gA,
-            pin_memory=(device.type == "cuda"),
-        )
+            train_loader = torch.utils.data.DataLoader(
+                subset_ds,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                worker_init_fn=seed_worker if args.num_workers > 0 else None,
+                generator=g_loader,
+                pin_memory=(device.type == "cuda"),
+            )
 
-        modelA = resnet18_arch.resnet_18_cifar()
-        criterionA = nn.CrossEntropyLoss()
-        optimizerA = optim.SGD(modelA.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+            model = build_model(args.model, num_classes=num_classes).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = build_optimizer(model, lr=args.lr)
+            scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-        historyA = train_loop.train(
-            model=modelA,
-            criterion=criterionA,
-            optimizer=optimizerA,
-            train_loader=train_loader_A,
-            val_loader=val_loader,
-            epochs=args.epochs,
-            device=device,
-            save_dir=modelA_dir,
-            run_name=f"resnet18_cifar10_seed{seed}_subsetA",
-            save_every=1,
-            save_last=True,
-        )
-        torch.save({"base_seed": seed, "model_seed": seedA, "subset": "A", "history": historyA},
-                   os.path.join(modelA_dir, "history.pt"))
-        
-        """
+            history = train_loop.train(
+                model=model,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=args.epochs,
+                device=device,
+                save_dir=model_dir,
+                run_name=f"{args.model}_{args.dataset}_seed{seed}_subset{subset_name}",
+                save_every=1,
+                save_last=True,
+            )
 
-        # Train model on subset B
-        modelB_dir = os.path.join(run_dir, "subset_B")
-        os.makedirs(modelB_dir, exist_ok=True)
+            torch.save(
+                {
+                    "base_seed": seed,
+                    "model_seed": model_seed,
+                    "subset": subset_name,
+                    "dataset": args.dataset,
+                    "model": args.model,
+                    "history": history,
+                },
+                os.path.join(model_dir, "history.pt"),
+            )
 
-        seedB = seed * 1000 + 2
-        set_seed(seedB)
-        gB = torch.Generator().manual_seed(seedB)
-
-        train_loader_B = torch.utils.data.DataLoader(
-            subset_b,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            worker_init_fn=seed_worker if args.num_workers > 0 else None,
-            generator=gB,
-            pin_memory=(device.type == "cuda"),
-        )
-
-        modelB = resnet_arch.resnet_18_cifar()
-        criterionB = nn.CrossEntropyLoss()
-        optimizerB = optim.SGD(modelB.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-
-        historyB = train_loop.train(
-            model=modelB,
-            criterion=criterionB,
-            optimizer=optimizerB,
-            train_loader=train_loader_B,
-            val_loader=val_loader,
-            epochs=args.epochs,
-            device=device,
-            save_dir=modelB_dir,
-            run_name=f"resnet18_cifar10_seed{seed}_subsetB",
-            save_every=1,
-            save_last=True,
-        )
-        torch.save({"base_seed": seed, "model_seed": seedB, "subset": "B", "history": historyB},
-                   os.path.join(modelB_dir, "history.pt"))
-
-        # Optional: evaluate on test (you already have test_loader)
-        # Add a test() helper similar to validate() if needed.
-        """
+        # Optional: evaluate on test after training (you already created test_loader)
+        # Add a small test() helper similar to validate() if needed.
 
 
 if __name__ == "__main__":
