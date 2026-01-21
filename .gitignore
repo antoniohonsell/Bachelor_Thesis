@@ -1,0 +1,49 @@
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Environments ---
+.venv/
+venv/
+env/
+ENV/
+conda/
+*.egg-info/
+dist/
+build/
+
+# --- Data / artifacts ---
+data/
+results/
+runs*/
+runs_*/
+wandb/
+mlruns/
+tensorboard/
+logs/
+
+# --- Model checkpoints / large files ---
+*.tar.gz
+*.zip
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Misc ---
+.DS_Store
