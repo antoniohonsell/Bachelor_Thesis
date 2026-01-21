@@ -51,13 +51,14 @@ def train(
     model,
     criterion,
     optimizer,
+    scheduler,
     train_loader,
     val_loader,
     epochs,
     device,
     save_dir=None,
     run_name="run",
-    save_every=10,
+    save_every=2,
     save_last=True,
 ):
     if save_dir is not None:
@@ -138,6 +139,9 @@ def train(
                 },
                 path,
             )
+
+        if scheduler is not None:
+            scheduler.step(epoch)
 
     # always save final checkpoint
     if save_dir is not None and save_last:
