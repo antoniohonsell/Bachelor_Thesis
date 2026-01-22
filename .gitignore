@@ -33,6 +33,7 @@ wandb/
 mlruns/
 tensorboard/
 logs/
+weight_matching_out
 
 # --- Model checkpoints / large files ---
 *.tar.gz
