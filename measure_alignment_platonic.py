@@ -11,7 +11,7 @@ import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
 import metrics_platonic as metrics
-import resnet20_arch_LayerNorm
+import old_architectures.resnet20_arch_LayerNorm as resnet20_arch_LayerNorm
 import utils
 
 
@@ -49,7 +49,12 @@ def build_cifar_loader(
     num_workers: int,
     data_root: str = "./data",
     dataset: str = "CIFAR10",
+    disjoint: bool = False,
+    subset_seed: int | None = None,
+    val_size: int = 5000,
+    train_eval_subset: str = "full",
 ):
+
         # deterministic transform (do NOT use train-time random aug for representation comparison)
     if dataset not in DATASET_STATS:
         raise ValueError(f"Unsupported dataset: {dataset}")
@@ -68,10 +73,29 @@ def build_cifar_loader(
         ds = DS(root=data_root, train=False, download=True, transform=tfm)
     elif split in ("train", "val"):
         full = DS(root=data_root, train=True, download=True, transform=tfm)
-        split_path = os.path.join(runs_dir, f"split_indices_{dataset}_seed{split_seed}.pt")
+
+        if disjoint:
+            if subset_seed is None:
+                subset_seed = split_seed
+            split_path = os.path.join(
+                runs_dir,
+                f"indices_{dataset}_splitseed{split_seed}_subsetseed{subset_seed}_val{val_size}.pt",
+            )
+        else:
+            split_path = os.path.join(runs_dir, f"split_indices_{dataset}_seed{split_seed}.pt")
+
         idx = torch.load(split_path)
-        indices = idx["train_indices"] if split == "train" else idx["val_indices"]
+
+        if split == "val":
+            indices = idx["val_indices"]
+        else:  # split == "train"
+            if disjoint and train_eval_subset in ("A", "B"):
+                indices = idx["subset_a_indices"] if train_eval_subset == "A" else idx["subset_b_indices"]
+            else:
+                indices = idx["train_indices"]
+
         ds = Subset(full, indices)
+
     else:
         raise ValueError(f"Unknown split: {split}")
 
@@ -208,6 +232,25 @@ def main():
     parser.add_argument("--runs_dir", type=str, default="./runs_resnet20_CIFAR10")
     parser.add_argument("--which", type=str, default="best", choices=["best", "final"])
 
+    # Disjoint-run support (main_disjoint.py layout)
+    parser.add_argument("--disjoint", action="store_true",
+                        help="Use main_disjoint.py layout: seed_X/subset_A|B/")
+    parser.add_argument("--subset_a", type=str, default="A", choices=["A", "B"],
+                        help="Subset for model A checkpoint (disjoint mode)")
+    parser.add_argument("--subset_b", type=str, default="B", choices=["A", "B"],
+                        help="Subset for model B checkpoint (disjoint mode)")
+
+    # Indices file naming used by main_disjoint.py
+    parser.add_argument("--subset_seed", type=int, default=None,
+                        help="subset_seed used in main_disjoint.py (default: split_seed)")
+    parser.add_argument("--val_size", type=int, default=5000,
+                        help="val_size used in main_disjoint.py (only for locating indices file)")
+
+    # For split=train in disjoint mode: choose which indices to evaluate on
+    parser.add_argument("--train_eval_subset", type=str, default="full", choices=["full", "A", "B"],
+                        help="In disjoint mode & split=train: evaluate on full train_indices or subset A/B indices")
+
+
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--split_seed", type=int, default=50)
 
@@ -228,6 +271,8 @@ def main():
     parser.add_argument("--no_normalize", action="store_true")   # skip L2 normalize
     parser.add_argument("--output_dir", type=str, default="./results/alignment_resnet")
     args = parser.parse_args()
+    if args.subset_seed is None:
+        args.subset_seed = args.split_seed
 
     device = utils.get_device()
 
@@ -236,18 +281,22 @@ def main():
         if args.seed_a is None or args.seed_b is None:
             raise ValueError("Provide either --ckpt_a/--ckpt_b or --seed_a/--seed_b")
 
-        def ckpt_from_seed(seed: int):
+        def ckpt_from_seed(seed: int, subset: str | None):
             run_dir = os.path.join(args.runs_dir, f"seed_{seed}")
-            fname = f"resnet20_{args.dataset}_seed{seed}_{args.which}.pth"
-            return os.path.join(run_dir, fname)
+            if args.disjoint:
+                # main_disjoint.py saves under: seed_{seed}/subset_{A|B}/
+                model_dir = os.path.join(run_dir, f"subset_{subset}")
+                fname = f"resnet20_{args.dataset}_seed{seed}_subset{subset}_{args.which}.pth"
+                return os.path.join(model_dir, fname)
+            else:
+                fname = f"resnet20_{args.dataset}_seed{seed}_{args.which}.pth"
+                return os.path.join(run_dir, fname)
 
-        ckpt_a = ckpt_from_seed(args.seed_a)
-        ckpt_b = ckpt_from_seed(args.seed_b)
+        ckpt_a = ckpt_from_seed(args.seed_a, args.subset_a if args.disjoint else None)
+        ckpt_b = ckpt_from_seed(args.seed_b, args.subset_b if args.disjoint else None)
     else:
         ckpt_a, ckpt_b = args.ckpt_a, args.ckpt_b
 
-    assert os.path.exists(ckpt_a), ckpt_a
-    assert os.path.exists(ckpt_b), ckpt_b
 
     # Data
     loader = build_cifar_loader(
@@ -257,6 +306,10 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         dataset=args.dataset,
+        disjoint=args.disjoint,
+        subset_seed=args.subset_seed,
+        val_size=args.val_size,
+        train_eval_subset=args.train_eval_subset,
     )
 
     # Models

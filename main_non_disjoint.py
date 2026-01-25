@@ -10,9 +10,9 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import random_split
 
-import resnet18_arch_BatchNorm
-import resnet20_arch_BatchNorm
-import resnet20_arch_LayerNorm
+import old_architectures.resnet18_arch_BatchNorm as resnet18_arch_BatchNorm
+import old_architectures.resnet20_arch_BatchNorm as resnet20_arch_BatchNorm
+import old_architectures.resnet20_arch_LayerNorm as resnet20_arch_LayerNorm
 import train_loop
 import utils
 

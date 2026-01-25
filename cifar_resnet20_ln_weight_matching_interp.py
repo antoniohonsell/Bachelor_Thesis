@@ -14,7 +14,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 import utils
-import resnet20_arch_LayerNorm
+import old_architectures.resnet20_arch_LayerNorm as resnet20_arch_LayerNorm
 
 from weight_matching_torch import (
     apply_permutation,
