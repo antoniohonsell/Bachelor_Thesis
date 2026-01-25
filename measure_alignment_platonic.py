@@ -1,5 +1,5 @@
-from html import parser
 import os
+import glob
 import argparse
 
 import numpy as np
@@ -11,7 +11,8 @@ import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
 import metrics_platonic as metrics
-import old_architectures.resnet20_arch_LayerNorm as resnet20_arch_LayerNorm
+from architectures import resnet20
+from architectures import build_model
 import utils
 
 
@@ -26,9 +27,11 @@ DATASET_STATS = {
     },
 }
 
+
 def load_resnet_from_ckpt(ckpt_path: str, device: torch.device, num_classes: int):
     ckpt = torch.load(ckpt_path, map_location=device)
-    model = resnet20_arch_LayerNorm.resnet20(num_classes=num_classes)
+    model = build_model("resnet20",num_classes=num_classes, norm="bn")
+    #model = resnet20(num_classes=num_classes, norm = "ln")
 
     # If the checkpoint was saved under DataParallel, keys may be prefixed with 'module.'
     state_dict = ckpt["state_dict"]
@@ -40,6 +43,12 @@ def load_resnet_from_ckpt(ckpt_path: str, device: torch.device, num_classes: int
     return model
 
 
+def _pick_latest(path_glob: str) -> str:
+    cand = glob.glob(path_glob)
+    if len(cand) == 0:
+        raise FileNotFoundError(f"No files match: {path_glob}")
+    return max(cand, key=lambda p: os.path.getmtime(p))
+
 
 def build_cifar_loader(
     split: str,
@@ -50,12 +59,9 @@ def build_cifar_loader(
     data_root: str = "./data",
     dataset: str = "CIFAR10",
     disjoint: bool = False,
-    subset_seed: int | None = None,
-    val_size: int = 5000,
-    train_eval_subset: str = "full",
+    indices_path: str | None = None,
 ):
-
-        # deterministic transform (do NOT use train-time random aug for representation comparison)
+    # deterministic transform (do NOT use train-time random aug for representation comparison)
     if dataset not in DATASET_STATS:
         raise ValueError(f"Unsupported dataset: {dataset}")
     stats = DATASET_STATS[dataset]
@@ -68,37 +74,45 @@ def build_cifar_loader(
         DS = torchvision.datasets.CIFAR10
     elif dataset == "CIFAR100":
         DS = torchvision.datasets.CIFAR100
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}")
 
     if split == "test":
         ds = DS(root=data_root, train=False, download=True, transform=tfm)
+
     elif split in ("train", "val"):
         full = DS(root=data_root, train=True, download=True, transform=tfm)
 
-        if disjoint:
-            if subset_seed is None:
-                subset_seed = split_seed
-            split_path = os.path.join(
-                runs_dir,
-                f"indices_{dataset}_splitseed{split_seed}_subsetseed{subset_seed}_val{val_size}.pt",
-            )
-        else:
+        if not disjoint:
+            # produced by main_non_disjoint.py
             split_path = os.path.join(runs_dir, f"split_indices_{dataset}_seed{split_seed}.pt")
+            if not os.path.exists(split_path):
+                raise FileNotFoundError(
+                    f"Missing split file: {split_path}\n"
+                    f"Run main_non_disjoint.py (or point --runs_dir to the correct folder)."
+                )
+        else:
+            # produced by main_disjoint.py:
+            # indices_{dataset}_splitseed{split_seed}_subsetseed{...}_val{...}.pt
+            if indices_path is not None:
+                split_path = indices_path
+                if not os.path.exists(split_path):
+                    raise FileNotFoundError(f"--indices_path does not exist: {split_path}")
+            else:
+                split_path = _pick_latest(os.path.join(runs_dir, f"indices_{dataset}_splitseed{split_seed}_*.pt"))
 
         idx = torch.load(split_path)
 
-        if split == "val":
-            indices = idx["val_indices"]
-        else:  # split == "train"
-            if disjoint and train_eval_subset in ("A", "B"):
-                indices = idx["subset_a_indices"] if train_eval_subset == "A" else idx["subset_b_indices"]
-            else:
-                indices = idx["train_indices"]
-
+        # Important for comparability: both models should be evaluated on the SAME examples & order.
+        # For disjoint training, 'train_indices' is the shared train split (union) from main_disjoint.py.
+        indices = idx["train_indices"] if split == "train" else idx["val_indices"]
         ds = Subset(full, indices)
+
+        print(f"[data] using indices file: {split_path}")
+        print(f"[data] split={split} | N={len(indices)} | disjoint={disjoint}")
 
     else:
         raise ValueError(f"Unknown split: {split}")
-
 
     return DataLoader(
         ds,
@@ -188,7 +202,7 @@ def layerwise_scores(
     if pairing not in ("diagonal", "best"):
         raise ValueError("pairing must be 'diagonal' or 'best'")
 
-    # Move + preprocess once (still modest size at CIFAR10 layer dims)
+    # Move + preprocess once (still modest size at CIFAR layer dims)
     A = [prepare_features(f, device=device, q=q, exact=exact) for f in feats_A]
     B = [prepare_features(f, device=device, q=q, exact=exact) for f in feats_B]
 
@@ -221,7 +235,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # Dataset
-    parser.add_argument("--dataset", type=str, default="CIFAR10")
+    parser.add_argument("--dataset", type=str, default="CIFAR10", choices=["CIFAR10", "CIFAR100"])
 
     # Provide either explicit checkpoints OR seeds + runs_dir + which
     parser.add_argument("--ckpt_a", type=str, default=None)
@@ -232,24 +246,15 @@ def main():
     parser.add_argument("--runs_dir", type=str, default="./runs_resnet20_CIFAR10")
     parser.add_argument("--which", type=str, default="best", choices=["best", "final"])
 
-    # Disjoint-run support (main_disjoint.py layout)
+    # Disjoint A/B (for main_disjoint.py checkpoints + indices)
     parser.add_argument("--disjoint", action="store_true",
-                        help="Use main_disjoint.py layout: seed_X/subset_A|B/")
-    parser.add_argument("--subset_a", type=str, default="A", choices=["A", "B"],
-                        help="Subset for model A checkpoint (disjoint mode)")
-    parser.add_argument("--subset_b", type=str, default="B", choices=["A", "B"],
-                        help="Subset for model B checkpoint (disjoint mode)")
-
-    # Indices file naming used by main_disjoint.py
-    parser.add_argument("--subset_seed", type=int, default=None,
-                        help="subset_seed used in main_disjoint.py (default: split_seed)")
-    parser.add_argument("--val_size", type=int, default=5000,
-                        help="val_size used in main_disjoint.py (only for locating indices file)")
-
-    # For split=train in disjoint mode: choose which indices to evaluate on
-    parser.add_argument("--train_eval_subset", type=str, default="full", choices=["full", "A", "B"],
-                        help="In disjoint mode & split=train: evaluate on full train_indices or subset A/B indices")
-
+                        help="Use disjoint run layout (seed_x/subset_A|B) + indices_{dataset}_splitseed*.pt")
+    parser.add_argument("--subset_a", type=str, default=None, choices=["A", "B"],
+                        help="Subset for model A (only with --disjoint)")
+    parser.add_argument("--subset_b", type=str, default=None, choices=["A", "B"],
+                        help="Subset for model B (only with --disjoint)")
+    parser.add_argument("--indices_path", type=str, default=None,
+                        help="Optional explicit path to indices_*.pt (only used with --disjoint)")
 
     parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--split_seed", type=int, default=50)
@@ -271,8 +276,6 @@ def main():
     parser.add_argument("--no_normalize", action="store_true")   # skip L2 normalize
     parser.add_argument("--output_dir", type=str, default="./results/alignment_resnet")
     args = parser.parse_args()
-    if args.subset_seed is None:
-        args.subset_seed = args.split_seed
 
     device = utils.get_device()
 
@@ -281,22 +284,30 @@ def main():
         if args.seed_a is None or args.seed_b is None:
             raise ValueError("Provide either --ckpt_a/--ckpt_b or --seed_a/--seed_b")
 
-        def ckpt_from_seed(seed: int, subset: str | None):
-            run_dir = os.path.join(args.runs_dir, f"seed_{seed}")
-            if args.disjoint:
-                # main_disjoint.py saves under: seed_{seed}/subset_{A|B}/
-                model_dir = os.path.join(run_dir, f"subset_{subset}")
+        if args.disjoint:
+            if args.subset_a is None or args.subset_b is None:
+                raise ValueError("With --disjoint, you must provide --subset_a and --subset_b (A/B).")
+
+            def ckpt_from_seed_subset(seed: int, subset: str):
+                run_dir = os.path.join(args.runs_dir, f"seed_{seed}", f"subset_{subset}")
                 fname = f"resnet20_{args.dataset}_seed{seed}_subset{subset}_{args.which}.pth"
-                return os.path.join(model_dir, fname)
-            else:
+                return os.path.join(run_dir, fname)
+
+            ckpt_a = ckpt_from_seed_subset(args.seed_a, args.subset_a)
+            ckpt_b = ckpt_from_seed_subset(args.seed_b, args.subset_b)
+        else:
+            def ckpt_from_seed(seed: int):
+                run_dir = os.path.join(args.runs_dir, f"seed_{seed}")
                 fname = f"resnet20_{args.dataset}_seed{seed}_{args.which}.pth"
                 return os.path.join(run_dir, fname)
 
-        ckpt_a = ckpt_from_seed(args.seed_a, args.subset_a if args.disjoint else None)
-        ckpt_b = ckpt_from_seed(args.seed_b, args.subset_b if args.disjoint else None)
+            ckpt_a = ckpt_from_seed(args.seed_a)
+            ckpt_b = ckpt_from_seed(args.seed_b)
     else:
         ckpt_a, ckpt_b = args.ckpt_a, args.ckpt_b
 
+    assert os.path.exists(ckpt_a), ckpt_a
+    assert os.path.exists(ckpt_b), ckpt_b
 
     # Data
     loader = build_cifar_loader(
@@ -307,22 +318,13 @@ def main():
         num_workers=args.num_workers,
         dataset=args.dataset,
         disjoint=args.disjoint,
-        subset_seed=args.subset_seed,
-        val_size=args.val_size,
-        train_eval_subset=args.train_eval_subset,
+        indices_path=args.indices_path,
     )
 
     # Models
-    if args.dataset == "CIFAR10":
-        num_classes = 10
-    elif args.dataset == "CIFAR100":
-        num_classes = 100
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
-
+    num_classes = 10 if args.dataset == "CIFAR10" else 100
     model_a = load_resnet_from_ckpt(ckpt_a, device=device, num_classes=num_classes)
     model_b = load_resnet_from_ckpt(ckpt_b, device=device, num_classes=num_classes)
-
 
     # Features
     feats_a = extract_layer_features(model_a, loader, device, layers=args.layers,
@@ -345,9 +347,12 @@ def main():
     # Report
     print(f"ckpt_a: {ckpt_a}")
     print(f"ckpt_b: {ckpt_b}")
-    print(f"split: {args.split} | metric: {args.metric} | pairing: {args.pairing}")
+    print(f"dataset: {args.dataset} | split: {args.split} | metric: {args.metric} | pairing: {args.pairing}")
     if "knn" in args.metric:
         print(f"topk: {args.topk}")
+    if args.disjoint:
+        print(f"disjoint: True | subsets: A={args.subset_a} B={args.subset_b} | split_seed={args.split_seed}")
+
     if args.pairing == "diagonal":
         for i, ln in enumerate(args.layers):
             print(f"{ln:>10}: {scores[i]:.6f}")
@@ -355,11 +360,16 @@ def main():
     else:
         print(f"best_score: {scores[0]:.6f} at layers (a,b) = {best_ij}")
 
-    # Save
+    # Save (include topk in filename for knn metrics to avoid overwriting)
     os.makedirs(args.output_dir, exist_ok=True)
     base_a = os.path.basename(ckpt_a).replace(".pth", "")
     base_b = os.path.basename(ckpt_b).replace(".pth", "")
-    out_name = f"{base_a}__vs__{base_b}__{args.split}__{args.metric}__{args.pairing}.npz"
+
+    metric_tag = args.metric
+    if "knn" in args.metric:
+        metric_tag = f"{args.metric}_topk{args.topk}"
+
+    out_name = f"{base_a}__vs__{base_b}__{args.split}__{metric_tag}__{args.pairing}.npz"
     out_path = os.path.join(args.output_dir, out_name)
 
     np.savez(
@@ -369,12 +379,21 @@ def main():
         layers=np.array(args.layers),
         ckpt_a=ckpt_a,
         ckpt_b=ckpt_b,
+        dataset=args.dataset,
         split=args.split,
         metric=args.metric,
+        metric_tag=metric_tag,
+        pairing=args.pairing,
         topk=args.topk,
         q=args.q,
         pool=args.pool,
         max_samples=args.max_samples,
+        disjoint=args.disjoint,
+        split_seed=args.split_seed,
+        runs_dir=args.runs_dir,
+        subset_a=args.subset_a,
+        subset_b=args.subset_b,
+        indices_path=args.indices_path,
     )
     print(f"saved: {out_path}")
 
