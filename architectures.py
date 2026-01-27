@@ -180,8 +180,22 @@ class CIFARResNet(nn.Module):
         return out
 
 
-def resnet20(num_classes: int = 10, *, in_channels: int = 3, norm: str = "bn", width_multiplier: int = 1) -> nn.Module:
-    return CIFARResNet((3, 3, 3), num_classes=num_classes, in_channels=in_channels, norm=norm, width_multiplier=width_multiplier)
+def resnet20(
+    num_classes: int = 10,
+    *,
+    in_channels: int = 3,
+    norm: str = "bn",
+    width_multiplier: int = 1,
+    shortcut_option: str = "A",
+) -> nn.Module:
+    return CIFARResNet(
+        (3, 3, 3),
+        num_classes=num_classes,
+        in_channels=in_channels,
+        norm=norm,
+        width_multiplier=width_multiplier,
+        shortcut_option=shortcut_option,
+    )
 
 def resnet32(num_classes: int = 10, *, in_channels: int = 3, norm: str = "bn", width_multiplier: int = 1) -> nn.Module:
     return CIFARResNet((5, 5, 5), num_classes=num_classes, in_channels=in_channels, norm=norm, width_multiplier=width_multiplier)
