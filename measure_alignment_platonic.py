@@ -11,7 +11,6 @@ import torchvision.transforms as transforms
 from tqdm.auto import tqdm
 
 import metrics_platonic as metrics
-from architectures import resnet20
 from architectures import build_model
 import utils
 
@@ -30,17 +29,24 @@ DATASET_STATS = {
 
 def load_resnet_from_ckpt(ckpt_path: str, device: torch.device, num_classes: int):
     ckpt = torch.load(ckpt_path, map_location=device)
-    model = build_model("resnet20",num_classes=num_classes, norm="bn")
-    #model = resnet20(num_classes=num_classes, norm = "ln")
 
-    # If the checkpoint was saved under DataParallel, keys may be prefixed with 'module.'
     state_dict = ckpt["state_dict"]
     if any(k.startswith("module.") for k in state_dict.keys()):
         state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
 
+    # Heuristic: your checkpoints contain keys like "norm1.ln.weight"
+    is_old_ln_ckpt = any(".ln." in k and k.startswith(("norm1", "layer")) for k in state_dict.keys())
+
+    if is_old_ln_ckpt:
+        import old_architectures.resnet20_arch_LayerNorm as rn20_ln
+        model = rn20_ln.resnet20(num_classes=num_classes)  # add width_multiplier=... if you trained with it
+    else:
+        model = build_model("resnet20", num_classes=num_classes, norm="bn")
+
     model.load_state_dict(state_dict, strict=True)
     model.to(device).eval()
     return model
+
 
 
 def _pick_latest(path_glob: str) -> str:
