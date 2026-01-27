@@ -24,6 +24,9 @@ Outputs per run:
 - test_metrics.json (final + best)
 - split indices .pt (once per dataset)
 
+HOW TO RUN:
+python train_resnet.py --out_dir ./runs_resnet20_ln_warmcos
+
 """
 from __future__ import annotations
 
