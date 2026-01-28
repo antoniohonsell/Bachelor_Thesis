@@ -16,7 +16,7 @@ import torchvision.transforms as transforms
 import utils
 import old_architectures.resnet20_arch_LayerNorm as resnet20_arch_LayerNorm
 
-from weight_matching_torch import (
+from linear_mode_connectivity.weight_matching_torch import (
     apply_permutation,
     resnet20_layernorm_permutation_spec,
     weight_matching,

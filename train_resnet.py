@@ -513,13 +513,13 @@ def train_one_run(
 
     # Build ResNet20 from architectures.py, then do BN->LN replacement
     model = architectures.build_model(
-        "resnet20",
-        num_classes=DATASET_STATS[dataset_name]["num_classes"],
-        norm="bn",  # build with BN modules so we can replace them deterministically
-        width_multiplier=width_multiplier,
-        shortcut_option=shortcut_option,
-    )
-    model = replace_batchnorm_with_layernorm2d(model).to(device)
+            "resnet20",
+            num_classes=...,
+            norm="flax_ln",
+            width_multiplier=width_multiplier,
+            shortcut_option=shortcut_option,
+            ).to(device)
+    # model = replace_batchnorm_with_layernorm2d(model).to(device)
 
     criterion = nn.CrossEntropyLoss()
 

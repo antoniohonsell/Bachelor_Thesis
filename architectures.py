@@ -50,12 +50,33 @@ def _norm2d(kind: str, num_channels: int) -> nn.Module:
     kind = (kind or "bn").lower()
     if kind in ("bn", "batchnorm", "batch_norm"):
         return nn.BatchNorm2d(num_channels)
+    
+    if kind in ("flax_ln", "ln2d", "layernorm2d", "channel_ln"):
+        return LayerNorm2d(num_channels, eps=1e-6)
+
+    # this part here does not match the FLAX implementation of git re-basin paper
     if kind in ("ln", "layernorm", "layer_norm"):
         # LN-like normalization for convs without requiring spatial dimensions.
         return nn.GroupNorm(1, num_channels)
     if kind in ("none", "identity", "no", "null"):
         return nn.Identity()
     raise ValueError(f"Unsupported norm kind: {kind}. Use 'bn', 'ln', or 'none'.")
+
+class LayerNorm2d(nn.Module):
+    """
+    Channel-only LayerNorm for NCHW tensors.
+    Matches Flax LayerNorm() on NHWC feature maps (normalizes over C).
+    """
+    def __init__(self, num_channels: int, eps: float = 1e-6, affine: bool = True):
+        super().__init__()
+        self.ln = nn.LayerNorm(num_channels, eps=eps, elementwise_affine=affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = self.ln(x)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        return x
+
 
 
 # ---------------------------
@@ -110,6 +131,12 @@ class CIFARBasicBlock(nn.Module):
             elif option == "B":
                 self.shortcut = nn.Sequential(
                     nn.Conv2d(in_planes, planes * self.expansion, kernel_size=1, stride=stride, bias=False),
+                    _norm2d(norm, planes * self.expansion),
+                )
+            elif option == "C":
+                # Flax-like: 3x3 stride-2 conv shortcut (+ norm)
+                self.shortcut = nn.Sequential(
+                    nn.Conv2d(in_planes, planes * self.expansion, kernel_size=3, stride=stride, padding=1, bias=False),
                     _norm2d(norm, planes * self.expansion),
                 )
             else:
