@@ -511,10 +511,11 @@ def train_one_run(
         pin_memory=(device.type == "cuda"),
     )
 
+    num_classes = int(DATASET_STATS[dataset_name]["num_classes"])
     # Build ResNet20 from architectures.py, then do BN->LN replacement
     model = architectures.build_model(
             "resnet20",
-            num_classes=...,
+            num_classes=num_classes,
             norm="flax_ln",
             width_multiplier=width_multiplier,
             shortcut_option=shortcut_option,
