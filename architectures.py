@@ -464,6 +464,28 @@ def resnet18(num_classes: int = 10, *, in_channels: int = 3, norm: str = "bn") -
 # LightNet family (from resnet18_arch_BatchNorm.py)
 # ---------------------------
 
+class MLP(nn.Module):
+    """
+    3 hidden layers of 512 unit each. ReLU activations, no normalization.
+    """
+    def __init__(self, num_classes: int = 10, input_shape: Tuple[int, int, int] = (1, 28, 28), hidden: int = 512):
+        super().__init__()
+        c, h, w = input_shape
+        self._flat = c * h * w
+        self.fc1 = nn.Linear(self._flat, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, hidden)
+        self.fc4 = nn.Linear(hidden, num_classes)
+        
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x) 
+        return x
+
 class LightNet(nn.Module):
     """
     Simple 2-layer MLP (MNIST-style default).
