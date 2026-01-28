@@ -1,6 +1,6 @@
 ## On-going Work
 
-These repository accompany my Bachelor Thesis offering a wide range of experiments that I carreid out to support the conjectures stated in the manuscript.
+These repository accompany my Bachelor Thesis. It offers a wide range of experiments that I am carrying out to support some of the conjectures stated in the manuscript.
 
 ## 1st level of experiments (representation space) : 
 
