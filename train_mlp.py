@@ -35,6 +35,7 @@ Output structure (default --out_dir ./runs_mlp):
 Usage:
   python train_mlp.py
   python train_mlp.py --out_dir ./runs_mlp --val_size 5000 --epochs_mnist 40 --epochs_cifar10 100
+  python train_mlp.py --arch MLP --out_dir ./runs_mlp --val_size 5000 --epochs_mnist 40
 """
 
 from __future__ import annotations
@@ -476,8 +477,8 @@ def parse_hidden_dims(s: str) -> Tuple[int, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets", nargs="+", default=["MNIST", "CIFAR10"], choices=["MNIST", "CIFAR10"])
-    parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1])
+    parser.add_argument("--datasets", nargs="+", default=["MNIST"], choices=["MNIST", "CIFAR10"])
+    parser.add_argument("--seeds", nargs="+", type=int, default=[0])
 
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--out_dir", type=str, default="./runs_mlp")

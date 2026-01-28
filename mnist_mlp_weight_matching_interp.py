@@ -22,8 +22,8 @@ import datasets as ds_utils  # repo's datasets.py (for MNIST stats + optional sp
 HOW TO RUN:
 
 python mnist_mlp_weight_matching_interp.py \
-  --ckpt-a /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_A/LightNet_MNIST_subsetA_seed0_best.pth \
-  --ckpt-b /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_B/LightNet_MNIST_subsetB_seed0_best.pth \
+  --ckpt-a /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_A/MLP_MNIST_subsetA_seed0_best.pth \
+  --ckpt-b /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_B/MLP_MNIST_subsetB_seed0_best.pth \
   --seed 0 \
   --out-dir ./wm_mnist_mlp_disjoint_seed0
 
