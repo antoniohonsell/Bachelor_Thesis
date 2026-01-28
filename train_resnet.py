@@ -642,7 +642,7 @@ def main() -> None:
     parser.add_argument("--warmup_epochs", type=int, default=1)
 
     parser.add_argument("--width_multiplier", type=int, default=1)
-    parser.add_argument("--shortcut_option", type=str, default="A", choices=["A", "B"])
+    parser.add_argument("--shortcut_option", type=str, default="C", choices=["A", "B", "C"])
 
     parser.add_argument("--skip_full", action="store_true")
     parser.add_argument("--skip_disjoint", action="store_true")
