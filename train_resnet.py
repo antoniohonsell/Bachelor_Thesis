@@ -878,6 +878,7 @@ def main() -> None:
                         shortcut_option=str(args.shortcut_option),
                         save_every=1,
                     )
+                break
 
 
 if __name__ == "__main__":
