@@ -186,6 +186,18 @@ class CIFARResNet(nn.Module):
         self.linear = nn.Linear(base * 4, num_classes)
 
         self.apply(_weights_init)
+        # Stabilize residual learning (torchvision calls this zero_init_residual).
+        # This is especially important for LayerNorm / wide models.
+        for m in self.modules():
+            if isinstance(m, CIFARBasicBlock):
+                n2 = m.n2
+                # GroupNorm/BatchNorm have .weight
+                if hasattr(n2, "weight") and n2.weight is not None:
+                    nn.init.zeros_(n2.weight)
+                # Your LayerNorm2d wrapper stores the actual LN as .ln
+                elif hasattr(n2, "ln") and hasattr(n2.ln, "weight") and n2.ln.weight is not None:
+                    nn.init.zeros_(n2.ln.weight)
+
 
     def _make_layer(self, planes: int, num_blocks: int, stride: int, option: str, norm: str) -> nn.Sequential:
         strides = [stride] + [1] * (num_blocks - 1)
