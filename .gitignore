@@ -35,6 +35,7 @@ tensorboard/
 logs/
 weight_matching_out/
 wm_mnist_mlp_disjoint_seed0/
+activation_stitching_out_mnist_seed0/
 
 # --- Model checkpoints / large files ---
 *.tar.gz

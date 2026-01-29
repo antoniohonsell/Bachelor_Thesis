@@ -529,6 +529,9 @@ def lightnet(num_classes: int = 10, *, input_shape: Tuple[int, int, int] = (1, 2
 def lightnet2(num_classes: int = 10, *, in_channels: int = 1) -> nn.Module:
     return LightNet2(num_classes=num_classes, in_channels=in_channels)
 
+def mlp(num_classes: int = 10, *, input_shape=(1, 28, 28), hidden: int = 512, **_) -> nn.Module:
+    return MLP(num_classes=num_classes, input_shape=input_shape, hidden=hidden)
+
 
 # ---------------------------
 # Registry / public API
@@ -550,6 +553,8 @@ _MODEL_REGISTRY: Dict[str, Callable[..., nn.Module]] = {
     "lightnet2": lightnet2,
     "LightNet": lightnet,     # legacy-ish alias
     "LightNet2": lightnet2,   # legacy-ish alias
+    "MLP": mlp,
+    "mlp": mlp,
 }
 
 
