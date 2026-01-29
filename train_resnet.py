@@ -632,7 +632,7 @@ def main() -> None:
     parser.add_argument("--epochs_cifar100", type=int, default=200)
 
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--num_workers", type=int, default=6)
+    parser.add_argument("--num_workers", type=int, default=8)
 
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
