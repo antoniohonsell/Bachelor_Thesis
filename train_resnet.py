@@ -835,7 +835,7 @@ def main() -> None:
                 for subset_name, subset_ds, offset in [("A", subset_a, 1), ("B", subset_b, 2)]:
                     model_seed = int(base_seed) * 1000 + offset
                     run_dir = dis_root / f"seed_{base_seed}" / f"subset_{subset_name}"
-                    run_name = f"resnet20_{dataset_name}_subset{subset_name}_seed{base_seed}"
+                    run_name = f"resnet20_{dataset_name}_seed{base_seed}_subset{subset_name}"
 
                     rc = RunConfig(
                         dataset=dataset_name,
