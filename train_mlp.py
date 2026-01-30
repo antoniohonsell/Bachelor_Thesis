@@ -422,8 +422,8 @@ def train_one_run(
         device=device,
         save_dir=str(run_dir),
         run_name=run_name,
-        save_every=save_every,
-        save_last=True,
+        save_every=epochs +1, # put it to save_every=save_every if you want to save each epoch
+        save_last=False, # put it to True if you want to save the last  
     )
     t1 = time.time()
 
@@ -477,7 +477,7 @@ def parse_hidden_dims(s: str) -> Tuple[int, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets", nargs="+", default=["MNIST"], choices=["MNIST", "CIFAR10"])
+    parser.add_argument("--datasets", nargs="+", default=["MNIST"], choices=["MNIST", "FASHIONMNIST",  "CIFAR10"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
 
     parser.add_argument("--data_root", type=str, default="./data")
@@ -489,6 +489,7 @@ def main() -> None:
     parser.add_argument("--val_size", type=int, default=5000)
 
     parser.add_argument("--epochs_mnist", type=int, default=20)
+    parser.add_argument("--epochs_fashionmnist", type=int, default=40)
     parser.add_argument("--epochs_cifar10", type=int, default=50)
 
     parser.add_argument("--batch_size", type=int, default=256)
@@ -611,7 +612,12 @@ def main() -> None:
             )
 
         # Epochs per dataset
-        epochs = int(args.epochs_mnist if dataset_name == "MNIST" else args.epochs_cifar10)
+        if dataset_name == "MNIST":
+            epochs = int(args.epochs_mnist)
+        elif dataset_name == "FASHIONMNIST":
+            epochs = int(args.epochs_fashionmnist)
+        else:
+            epochs = int(args.epochs_cifar10)
 
         # Dataset-level config
         save_json(ds_root / "dataset_config.json", {

@@ -58,7 +58,7 @@ def train(
     device,
     save_dir=None,
     run_name="run",
-    save_every=2,
+    save_every=1,
     save_last=True,
 ):
     if save_dir is not None:
