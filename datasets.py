@@ -5,7 +5,7 @@ datasets.py
 Dataset utilities for the generalization_experiments repo.
 
 Provides:
-- Standard dataset creation for: CIFAR10, CIFAR100, MNIST
+- Standard dataset creation for: CIFAR10, CIFAR100, MNIST, FashionMNIST
 - A stratified (distribution-preserving) splitter that partitions a training set
   into K disjoint parts (K=2/3/4 or any K>=2), with per-class proportions as
   equal as possible across parts.
@@ -53,6 +53,15 @@ DATASET_STATS: Dict[str, Dict[str, Any]] = {
         "in_channels": 1,
         "image_size": (28, 28),
     },
+    # Fashion-MNIST (grayscale 28x28, 10 classes).
+    # NOTE: mean/std below are commonly used defaults; you can recompute them if you want exact values.
+    "FASHIONMNIST": {
+        "mean": (0.2860,),
+        "std":  (0.3530,),
+        "num_classes": 10,
+        "in_channels": 1,
+        "image_size": (28, 28),
+    },
 }
 
 
@@ -89,8 +98,8 @@ def build_transforms(
       torchvision.transforms.Compose
     """
     dataset = dataset.strip().upper()
-    if dataset not in ("CIFAR10", "CIFAR100", "MNIST"):
-        raise ValueError(f"Unsupported dataset: {dataset} (expected CIFAR10/CIFAR100/MNIST)")
+    if dataset not in DATASET_STATS:
+        raise ValueError(f"Unsupported dataset: {dataset} (supported: {sorted(DATASET_STATS)})")
 
     if augment is None:
         augment = (dataset in ("CIFAR10", "CIFAR100"))  # default matches repo CIFAR scripts
@@ -105,12 +114,12 @@ def build_transforms(
             ])
         ops.append(transforms.ToTensor())
 
-    else:  # MNIST
+    else:  # MNIST / FashionMNIST 
         if train and augment:
             ops.append(transforms.RandomAffine(
-                degrees=10,
-                translate=(0.05, 0.05),
-                scale=(0.95, 1.05),
+                 degrees=10,
+                 translate=(0.05, 0.05),
+                 scale=(0.95, 1.05),
             ))
         ops.append(transforms.ToTensor())
 
@@ -162,10 +171,14 @@ def build_datasets(
         train_full = torchvision.datasets.CIFAR100(root=root, train=True, download=download, transform=train_transform)
         eval_full  = torchvision.datasets.CIFAR100(root=root, train=True, download=download, transform=eval_transform)
         test_ds    = torchvision.datasets.CIFAR100(root=root, train=False, download=download, transform=eval_transform)
-    else:  # MNIST
+    elif dataset == "MNIST":
         train_full = torchvision.datasets.MNIST(root=root, train=True, download=download, transform=train_transform)
         eval_full  = torchvision.datasets.MNIST(root=root, train=True, download=download, transform=eval_transform)
         test_ds    = torchvision.datasets.MNIST(root=root, train=False, download=download, transform=eval_transform)
+    else:  # FASHIONMNIST
+        train_full = torchvision.datasets.FashionMNIST(root=root, train=True, download=download, transform=train_transform)
+        eval_full  = torchvision.datasets.FashionMNIST(root=root, train=True, download=download, transform=eval_transform)
+        test_ds    = torchvision.datasets.FashionMNIST(root=root, train=False, download=download, transform=eval_transform)
 
     return train_full, eval_full, test_ds
 
