@@ -29,7 +29,7 @@ Full Regime: seed 0 vs seed 1
 python cifar_resnet20_ln_weight_matching_interp.py --dataset CIFAR10 --ckpt-a ./runs_resnet20_ln_warmcos/CIFAR10/full/seed_0/resnet20_CIFAR10_full_seed0_best.pth --ckpt-b ./runs_resnet20_ln_warmcos/CIFAR10/full/seed_1/resnet20_CIFAR10_full_seed1_best.pth --width-multiplier 1 --shortcut-option C --norm flax_ln --out-dir ./weight_matching_out/CIFAR10_full_seed0_seed1
 
 Disjoint Regime: subset A vs subset B
-python cifar_resnet20_ln_weight_matching_interp.py --dataset CIFAR10 --ckpt-a ./runs_resnet20_ln_warmcos/CIFAR10/disjoint/seed_0/subset_A/resnet20_CIFAR10_subsetA_seed0_best.pth --ckpt-b ./runs_resnet20_ln_warmcos/CIFAR10/disjoint/seed_0/subset_B/resnet20_CIFAR10_subsetB_seed0_best.pth --width-multiplier 1 --shortcut-option C --norm flax_ln --out-dir ./weight_matching_out/CIFAR10_disjoint_seed0_subA_subB
+python linear_mode_connectivity/cifar_resnet20_ln_weight_matching_interp.py --dataset CIFAR10 --ckpt-a ../runs_resnet20_ln_warmcos_1/CIFAR10/disjoint/seed_0/subset_A/resnet20_CIFAR10_subsetA_seed0_best.pth --ckpt-b ../runs_resnet20_ln_warmcos_1/CIFAR10/disjoint/seed_0/subset_B/resnet20_CIFAR10_subsetB_seed0_best.pth --width-multiplier 1 --shortcut-option C --norm flax_ln --out-dir ./weight_matching_out/CIFAR10_disjoint_seed0_subA_subB
 
 
 """

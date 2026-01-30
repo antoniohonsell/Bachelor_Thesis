@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, Subset
 import architectures
 import datasets
 
-from activation_permutation_stitching import (
+from model_stitching.activation_permutation_stitching import (
     LayerPermutation,
     apply_mlp_hidden_permutations_to_state_dict,
     compute_layer_permutation_from_activations,

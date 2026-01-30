@@ -31,10 +31,10 @@ import torch
 import matplotlib.pyplot as plt
 
 # Keep coherence with your other plotting scripts (optional)
-try:
-    import matplotlib_style as _  # noqa: F401
-except Exception:
-    pass
+# try:
+#     import matplotlib_style as _  # noqa: F401
+# except Exception:
+#     pass
 
 
 def _to_np(x: Any) -> np.ndarray:

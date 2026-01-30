@@ -28,69 +28,112 @@ def permutation_spec_from_axes_to_perm(
                 perm_to_axes[p].append((k, axis))
     return PermutationSpec(perm_to_axes=dict(perm_to_axes), axes_to_perm=axes_to_perm)
 
-
-def resnet20_layernorm_permutation_spec() -> PermutationSpec:
+def resnet20_layernorm_permutation_spec(
+    *,
+    shortcut_option: str = "C",
+    state_dict: Optional[Dict[str, torch.Tensor]] = None,
+) -> PermutationSpec:
     """
-    Permutation spec for your CIFAR ResNet-20 with LayerNorm2d:
-      - conv weights: (out_ch, in_ch, k, k)
-      - linear weight: (out_features, in_features)
-      - LayerNorm2d wraps nn.LayerNorm as `.ln` => params end with `.ln.weight` and `.ln.bias`
+    Permutation spec for CIFAR ResNet-20.
+
+    This is made robust to:
+      - naming differences: (n1/n2) vs (norm1/norm2)
+      - norm param layouts: LayerNorm2d wrapper uses `.ln.weight/.ln.bias`,
+        BN/GN use `.weight/.bias` (+ optional running stats)
+      - shortcut option: A has no shortcut params; B/C have shortcut conv+norm params
     """
     conv_w = lambda k, p_in, p_out: {k: (p_out, p_in, None, None)}
-    ln_wb = lambda k, p: {f"{k}.ln.weight": (p,), f"{k}.ln.bias": (p,)}
     linear_wb = lambda k, p_in: {f"{k}.weight": (None, p_in), f"{k}.bias": (None,)}
+
+    def norm_wb(base: str, p: str) -> Dict[str, Tuple[Optional[str], ...]]:
+        d: Dict[str, Tuple[Optional[str], ...]] = {}
+        # Default: assume LayerNorm2d wrapper layout
+        if state_dict is None:
+            d[f"{base}.ln.weight"] = (p,)
+            d[f"{base}.ln.bias"] = (p,)
+            return d
+
+        # LayerNorm2d wrapper
+        if f"{base}.ln.weight" in state_dict:
+            d[f"{base}.ln.weight"] = (p,)
+            if f"{base}.ln.bias" in state_dict:
+                d[f"{base}.ln.bias"] = (p,)
+            return d
+
+        # BN / GN / other affine norms
+        if f"{base}.weight" in state_dict:
+            d[f"{base}.weight"] = (p,)
+        if f"{base}.bias" in state_dict:
+            d[f"{base}.bias"] = (p,)
+        if f"{base}.running_mean" in state_dict:
+            d[f"{base}.running_mean"] = (p,)
+        if f"{base}.running_var" in state_dict:
+            d[f"{base}.running_var"] = (p,)
+        return d
+
+    # Detect whether your checkpoint uses n1/n2 (current code) or norm1/norm2 (old code)
+    stem_norm = "n1" if (state_dict and any(k.startswith("n1.") for k in state_dict)) else "norm1"
+    block_n1 = "n1" if (state_dict and any(".n1." in k for k in state_dict)) else "norm1"
+    block_n2 = "n2" if (state_dict and any(".n2." in k for k in state_dict)) else "norm2"
+
+    # Detect shortcut params from the checkpoint if possible (more reliable than the CLI flag)
+    use_shortcut = str(shortcut_option).upper() in ("B", "C")
+    if state_dict is not None:
+        use_shortcut = any(k.endswith("shortcut.0.weight") for k in state_dict.keys())
 
     axes: Dict[str, Tuple[Optional[str], ...]] = {}
 
     # Stem
     axes.update(conv_w("conv1.weight", None, "P_bg0"))
-    axes.update(ln_wb("norm1", "P_bg0"))
+    axes.update(norm_wb(stem_norm, "P_bg0"))
 
-    # Helper for blocks
     def easyblock(layer: int, block: int, p: str) -> Dict[str, Tuple[Optional[str], ...]]:
         inner = f"P_layer{layer}_{block}_inner"
         prefix = f"layer{layer}.{block}"
-        d = {}
+        d: Dict[str, Tuple[Optional[str], ...]] = {}
         d.update(conv_w(f"{prefix}.conv1.weight", p, inner))
-        d.update(ln_wb(f"{prefix}.norm1", inner))
+        d.update(norm_wb(f"{prefix}.{block_n1}", inner))
         d.update(conv_w(f"{prefix}.conv2.weight", inner, p))
-        d.update(ln_wb(f"{prefix}.norm2", p))
-        # shortcut is Identity => no params
+        d.update(norm_wb(f"{prefix}.{block_n2}", p))
         return d
 
-    def shortcutblock(layer: int, block: int, p_in: str, p_out: str) -> Dict[str, Tuple[Optional[str], ...]]:
+    def transitionblock(layer: int, block: int, p_in: str, p_out: str) -> Dict[str, Tuple[Optional[str], ...]]:
         inner = f"P_layer{layer}_{block}_inner"
         prefix = f"layer{layer}.{block}"
-        d = {}
+        d: Dict[str, Tuple[Optional[str], ...]] = {}
         d.update(conv_w(f"{prefix}.conv1.weight", p_in, inner))
-        d.update(ln_wb(f"{prefix}.norm1", inner))
+        d.update(norm_wb(f"{prefix}.{block_n1}", inner))
         d.update(conv_w(f"{prefix}.conv2.weight", inner, p_out))
-        d.update(ln_wb(f"{prefix}.norm2", p_out))
-
-        # shortcut = nn.Sequential(Conv2d, LayerNorm2d)
-        d.update(conv_w(f"{prefix}.shortcut.0.weight", p_in, p_out))
-        d.update(ln_wb(f"{prefix}.shortcut.1", p_out))
+        d.update(norm_wb(f"{prefix}.{block_n2}", p_out))
+        if use_shortcut:
+            d.update(conv_w(f"{prefix}.shortcut.0.weight", p_in, p_out))
+            d.update(norm_wb(f"{prefix}.shortcut.1", p_out))
         return d
 
-    # layer1: 3 easy blocks at P_bg0
+    # layer1
     axes.update(easyblock(1, 0, "P_bg0"))
     axes.update(easyblock(1, 1, "P_bg0"))
     axes.update(easyblock(1, 2, "P_bg0"))
 
-    # layer2: first block changes channels: P_bg0 -> P_bg1, then easy blocks at P_bg1
-    axes.update(shortcutblock(2, 0, "P_bg0", "P_bg1"))
+    # layer2
+    axes.update(transitionblock(2, 0, "P_bg0", "P_bg1"))
     axes.update(easyblock(2, 1, "P_bg1"))
     axes.update(easyblock(2, 2, "P_bg1"))
 
-    # layer3: first block changes channels: P_bg1 -> P_bg2, then easy blocks at P_bg2
-    axes.update(shortcutblock(3, 0, "P_bg1", "P_bg2"))
+    # layer3
+    axes.update(transitionblock(3, 0, "P_bg1", "P_bg2"))
     axes.update(easyblock(3, 1, "P_bg2"))
     axes.update(easyblock(3, 2, "P_bg2"))
 
     # classifier
     axes.update(linear_wb("linear", "P_bg2"))
 
+    # IMPORTANT: prune spec to exactly what exists in the checkpoint, to avoid KeyErrors later
+    if state_dict is not None:
+        axes = {k: v for k, v in axes.items() if k in state_dict}
+
     return permutation_spec_from_axes_to_perm(axes)
+
 
 
 def _index_select(x: torch.Tensor, dim: int, index: torch.Tensor) -> torch.Tensor:
