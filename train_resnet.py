@@ -547,8 +547,8 @@ def train_one_run(
         device=device,
         save_dir=str(run_dir),
         run_name=run_name,
-        save_every=save_every,
-        save_last=True,
+        save_every=epochs +1, # usually I put to save_every=save_every, to save every epoch 
+        save_last=False, # usually I put it to false 
     )
     t1 = time.time()
 
