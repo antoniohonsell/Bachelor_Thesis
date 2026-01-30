@@ -232,7 +232,9 @@ def _plot_corr_diagnostics(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", type=str, default="MNIST", choices=["MNIST"])
+    # IMPORTANT: runs_mlp/ uses the dataset string as folder name (e.g. "FASHIONMNIST").
+    p.add_argument("--dataset", type=str, default="MNIST",
+                   help="MNIST or FASHIONMNIST (case-insensitive).")
     p.add_argument("--data-root", type=str, default="./data")
     p.add_argument("--runs-root", type=str, default="./runs_mlp")
     p.add_argument("--regime", type=str, default="disjoint")
@@ -253,8 +255,16 @@ def main() -> None:
     p.add_argument("--do-interp", action="store_true")
     p.add_argument("--num-lambdas", type=int, default=25)
 
-    p.add_argument("--out-dir", type=str, default="./activation_stitching_out_mnist_mlp")
+    p.add_argument("--out-dir", type=str, default=None,
+                   help="If not set, defaults to ./activation_stitching_out_<dataset>_mlp")
     args = p.parse_args()
+
+    # Normalize dataset name to match train_mlp.py conventions and folder names.
+    args.dataset = str(args.dataset).strip().upper()
+    if args.dataset not in datasets.DATASET_STATS:
+        raise ValueError(f"Unsupported dataset: {args.dataset} (supported: {sorted(datasets.DATASET_STATS)})")
+    if args.out_dir is None:
+        args.out_dir = f"./activation_stitching_out_{args.dataset.lower()}_mlp"
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -321,11 +331,16 @@ def main() -> None:
     hidden = int(state_a_full["fc1.weight"].shape[0])
     flat = int(state_a_full["fc1.weight"].shape[1])
     num_classes = int(state_a_full["fc4.weight"].shape[0])
-    if flat != 28 * 28:
-        raise ValueError(f"Expected MNIST flat dim 784, got {flat}")
+    stats = datasets.DATASET_STATS[args.dataset]
+    in_channels = int(stats["in_channels"])
+    h, w = tuple(stats["image_size"])
+    expected_flat = int(in_channels * h * w)
+    if flat != expected_flat:
+        raise ValueError(f"Expected {args.dataset} flat dim {expected_flat}, got {flat}")
 
-    model_a = architectures.MLP(num_classes=num_classes, input_shape=(1, 28, 28), hidden=hidden).to(device)
-    model_b = architectures.MLP(num_classes=num_classes, input_shape=(1, 28, 28), hidden=hidden).to(device)
+    input_shape = (in_channels, h, w)
+    model_a = architectures.MLP(num_classes=num_classes, input_shape=input_shape, hidden=hidden).to(device)
+    model_b = architectures.MLP(num_classes=num_classes, input_shape=input_shape, hidden=hidden).to(device)
     model_a.load_state_dict({k: v for k, v in state_a_full.items() if k in model_a.state_dict()}, strict=True)
     model_b.load_state_dict({k: v for k, v in state_b_full.items() if k in model_b.state_dict()}, strict=True)
 
@@ -362,7 +377,8 @@ def main() -> None:
     b_dev = to_device(state_b, device)
     bperm_dev = to_device(state_b_perm, device)
 
-    model_eval = architectures.MLP(num_classes=num_classes, input_shape=(1, 28, 28), hidden=hidden).to(device)
+    model_eval = architectures.MLP(num_classes=num_classes, input_shape=input_shape, hidden=hidden).to(device)
+
 
     def eval_state(params: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, float]]:
         model_eval.load_state_dict(params, strict=True)
