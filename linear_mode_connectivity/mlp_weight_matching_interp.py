@@ -21,11 +21,20 @@ import datasets as ds_utils  # repo's datasets.py (for MNIST stats + optional sp
 """
 HOW TO RUN:
 
-python mnist_mlp_weight_matching_interp.py \
+MNIST :
+
+python -m linear_mode_connectivity.mnist_mlp_weight_matching_interp \
   --ckpt-a /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_A/MLP_MNIST_subsetA_seed0_best.pth \
   --ckpt-b /Users/antonio2/Bachelor_Thesis/runs_mlp/MNIST/disjoint/seed_0/subset_B/MLP_MNIST_subsetB_seed0_best.pth \
   --seed 0 \
   --out-dir ./wm_mnist_mlp_disjoint_seed0
+
+FASHION MNIST:
+  
+python -m linear_mode_connectivity.mnist_mlp_weight_matching_interp \
+  --dataset FASHIONMNIST \
+  --ckpt-a /Users/antonio2/Bachelor_Thesis/runs_mlp/FASHIONMNIST/disjoint/seed_0/subset_A/mlp_FASHIONMNIST_subsetA_seed0_best.pth \
+  --ckpt-b /Users/antonio2/Bachelor_Thesis/runs_mlp/FASHIONMNIST/disjoint/seed_0/subset_B/mlp_FASHIONMNIST_subsetB_seed0_best.pth
 
 """
 
@@ -217,16 +226,25 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--eval-samples", type=int, default=1000, help="<=0 means full dataset")
 
+    parser.add_argument("--dataset",
+                        type=lambda s: s.strip().upper(),
+                        default="MNIST",
+                        choices=["MNIST", "FASHIONMNIST"],
+                        help="Must match the dataset used to train ckpt-a/ckpt-b.")
     parser.add_argument("--data-root", type=str, default="./data")
     parser.add_argument("--no-normalize", action="store_true")
     parser.add_argument("--train-eval-split", type=str, default="full", choices=["full", "part0", "part1"],
                         help="If you trained on subset A/B via a 2-way stratified split, use part0/part1 to evaluate "
                              "on that train subset (split uses --seed).")
 
-    parser.add_argument("--out-dir", type=str, default="./weight_matching_out_mnist_mlp")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="If unset, defaults to ./weight_matching_out_{dataset}_mlp")
     parser.add_argument("--silent", action="store_true")
     args = parser.parse_args()
 
+    dataset = args.dataset  # already upper-cased by arg type
+    if args.out_dir is None:
+        args.out_dir = f"./weight_matching_out_{dataset.lower()}_mlp"
     os.makedirs(args.out_dir, exist_ok=True)
     device = utils.get_device()
 
@@ -250,28 +268,28 @@ def main():
     n_classes = int(state_a_full[f"fc{max(infer_mlp_fc_layer_numbers(state_a_full))}.weight"].shape[0])
 
     if flat != 28 * 28:
-        raise ValueError(f"Expected MNIST flat dim 784, got {flat}. If this is intentional, adapt input_shape in MLP.")
-
+        raise ValueError(f"Expected 28x28 flat dim 784, got {flat}. If this is intentional, adapt input_shape in MLP.")
     # Build model
     model = architectures.MLP(num_classes=n_classes, input_shape=(1, 28, 28), hidden=hidden).to(device)
 
     # -------------------
-    # Dataset / loaders
+        # Dataset / loaders
     # -------------------
-    stats = ds_utils.DATASET_STATS["MNIST"]
-    ops = [transforms.ToTensor()]
-    if not args.no_normalize:
-        ops.append(transforms.Normalize(stats["mean"], stats["std"]))
-    tfm = transforms.Compose(ops)
-
-    train_full = torchvision.datasets.MNIST(root=args.data_root, train=True, download=True, transform=tfm)
-    test_set = torchvision.datasets.MNIST(root=args.data_root, train=False, download=True, transform=tfm)
+    # Use repo utility (supports MNIST + FASHIONMNIST).
+    train_full, eval_full, test_set = ds_utils.build_datasets(
+        dataset,
+        root=args.data_root,
+        download=True,
+        augment_train=False,
+        normalize=(not args.no_normalize),
+    )
+    train_base = eval_full  # evaluation transform (no augmentation)
 
     if args.train_eval_split in ("part0", "part1"):
-        parts, _, _ = ds_utils.split_dataset_stratified(train_full, num_parts=2, seed=args.seed, exact=False)
+        parts, _, _ = ds_utils.split_dataset_stratified(train_base, num_parts=2, seed=args.seed, exact=False)
         train_eval_set = parts[0 if args.train_eval_split == "part0" else 1]
     else:
-        train_eval_set = train_full
+        train_eval_set = train_base
 
     train_loader = torch.utils.data.DataLoader(
         train_eval_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
@@ -354,7 +372,7 @@ def main():
         test_loss_perm.append(vl)
         test_acc_perm.append(va)
 
-    title = f"MNIST MLP: {Path(args.ckpt_a).name} vs {Path(args.ckpt_b).name} (train_eval={args.train_eval_split})"
+    title = f"{dataset} MLP: {Path(args.ckpt_a).name} vs {Path(args.ckpt_b).name} (train_eval={args.train_eval_split})"
 
     fig = plot_interp_loss(title, lambdas, train_loss_naive, test_loss_naive, train_loss_perm, test_loss_perm)
     loss_path = os.path.join(args.out_dir, "interp_loss.png")
@@ -367,6 +385,7 @@ def main():
     plt.close(fig)
 
     results = {
+        "dataset": dataset,
         "lambdas": lambdas,
         "train_eval_split": args.train_eval_split,
         "train_loss_naive": train_loss_naive,
