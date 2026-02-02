@@ -29,7 +29,7 @@ from __future__ import annotations
 import pickle
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
 
 import torch
 import torch.nn as nn
@@ -42,6 +42,33 @@ except Exception as e:  # pragma: no cover
 
 TensorDict = Dict[str, torch.Tensor]
 
+# functions added for compatibiltiy with ResNEt
+
+def _as_tensor(out: Any) -> torch.Tensor:
+    if isinstance(out, torch.Tensor):
+        return out
+    if isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], torch.Tensor):
+        return out[0]
+    raise TypeError(f"Unsupported hook output type: {type(out)}") 
+
+
+def activation_to_2d(out: torch.Tensor, unit_dim: int = 1) -> torch.Tensor:
+    """
+    Convert an activation tensor to shape [M, d] where d indexes the permutable 'units'
+    (e.g., hidden units for MLP, channels for CNN), and M flattens everything else.
+
+    Examples:
+      - MLP hidden: [N, d] -> [N, d]
+      - Conv feature map: [N, C, H, W] with unit_dim=1 -> [N*H*W, C]
+    """
+    if out.ndim < 2:
+        raise ValueError(f"Expected activation with ndim>=2, got {out.shape}")
+    if unit_dim < 0:
+        unit_dim = out.ndim + unit_dim
+    if not (0 <= unit_dim < out.ndim):
+        raise ValueError(f"unit_dim out of range: {unit_dim} for out.ndim={out.ndim}")
+    x = torch.movedim(out, unit_dim, -1)
+    return x.reshape(-1, x.shape[-1])
 
 # -------------------------
 # IO helpers
@@ -217,6 +244,8 @@ def compute_layer_permutation_from_activations(
     device: torch.device,
     max_batches: Optional[int] = None,
     eps: float = 1e-12,
+    unit_dim: int = 1,
+    preprocess: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ) -> LayerPermutation:
     """
     Compute Hungarian permutation based on correlation of activations at `layer_name`.
@@ -234,10 +263,10 @@ def compute_layer_permutation_from_activations(
     acts: Dict[str, torch.Tensor] = {}
 
     def hook_a(_m, _inp, out):
-        acts["a"] = out.detach()
+        acts["a"] = _as_tensor(out).detach()
 
-    def hook_b(_m, _inp, out):
-        acts["b"] = out.detach()
+    def hook_b(_m, _inp, out):  
+        acts["b"] = _as_tensor(out).detach()
 
     ha = mod_a.register_forward_hook(hook_a)
     hb = mod_b.register_forward_hook(hook_b)
@@ -258,9 +287,16 @@ def compute_layer_permutation_from_activations(
             b = acts.get("b", None)
             if b is None:
                 raise RuntimeError(f"Hook for model_b layer '{layer_name}' did not fire.")
+            
+            if preprocess is not None:
+                a = preprocess(a)
+                b = preprocess(b)
+            
+            a2 = activation_to_2d(a, unit_dim=unit_dim)
+            b2 = activation_to_2d(b, unit_dim=unit_dim)
 
-            a2 = a.view(a.shape[0], -1)
-            b2 = b.view(b.shape[0], -1)
+            # a2 = a.view(a.shape[0], -1)
+            # b2 = b.view(b.shape[0], -1)
             # a2 = a.view(a.shape[0], -1).detach().cpu().double()
             # b2 = b.view(b.shape[0], -1).detach().cpu().double()
 
