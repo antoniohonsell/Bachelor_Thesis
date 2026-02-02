@@ -10,6 +10,22 @@ Mirrors model_stitching/mlp_activation_stitching.py outputs:
   - stitching curves (naive vs perm)
   - optional interpolation curves (naive vs perm)
   - plots + csv + results.json + SUMMARY.txt
+
+
+usually I need to put this before running :
+PYTHONPATH="$(pwd)"
+where pwd is the root  
+
+HOW TO RUN :
+python model_stitching/resnet20_activation_stitching.py \
+  --dataset CIFAR10 \
+  --runs-root ./runs_resnet20_1 \
+  --regime disjoint \
+  --base-seed 0 \
+  --which best \
+  --match-split train_eval \
+  --match-samples 10000 \
+  --do-interp
 """
 
 from __future__ import annotations
@@ -521,9 +537,9 @@ def main() -> None:
             stitch_metrics[split]["acc_perm"].append(acc)
 
     title = (
-        f"{args.dataset} ResNet20-LN activation stitching "
+        f"{args.dataset} ResNet20-LN activation stitching, disjoint"
         f"(width={width_multiplier}, shortcut={shortcut_option}) "
-        f"A={ckpt_a.name} B={ckpt_b.name} match={args.match_split}"
+        #f"A={ckpt_a.name} B={ckpt_b.name} match={args.match_split}"
     )
     _plot_stitching(title=title, cuts=cuts, metrics=stitch_metrics, out_dir=out_dir)
 
