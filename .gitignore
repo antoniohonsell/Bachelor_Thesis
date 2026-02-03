@@ -36,6 +36,8 @@ logs/
 weight_matching_out/
 wm_mnist_mlp_disjoint_seed0/
 activation_stitching_out_mnist_seed0/
+activation_stitching_out*
+activation_stitching_out_*/
 weight_matching_out_fashionmnist_mlp/
 activation_stitching_out_fashionmnist_mlp/
 # need to handle better the git ignore !!!
