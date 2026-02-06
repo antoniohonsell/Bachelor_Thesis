@@ -34,14 +34,17 @@ python linear_mode_connectivity/cifar_resnet20_ln_weight_matching_interp.py --da
 
 ==== new command to:
 
-PYTHONPATH=. python linear_mode_connectivity/cifar_resnet20_ln_weight_matching_interp.py \
-  --dataset CIFAR10 \
-  --ckpt-a ./runs_resnet20_CIFAR10_full_16/seed_0/resnet20_CIFAR10_full_seed0_best.pth \
-  --ckpt-b ./runs_resnet20_CIFAR10_full_16/seed_1/resnet20_CIFAR10_full_seed1_best.pth \
-  --width-multiplier 16 \
-  --shortcut-option C \
-  --norm flax_ln \
-  --out-dir ./weight_matching_out/CIFAR10_full_seed0_seed1
+export PYTHONPATH="$(pwd)" 
+for x in 1 ; do 
+    python linear_mode_connectivity/cifar_resnet20_ln_weight_matching_interp.py \
+    --dataset CIFAR100 \
+    --ckpt-a ./runs_resnet20_${x}/CIFAR100/disjoint/seed_0/subset_A/resnet20_CIFAR100_seed0_subsetA_best.pth \
+    --ckpt-b ./runs_resnet20_${x}/CIFAR100/disjoint/seed_0/subset_B/resnet20_CIFAR100_seed0_subsetB_best.pth \
+    --width-multiplier "$x" \
+    --shortcut-option C \
+    --norm flax_ln \
+    --out-dir ./weight_matching_out/resnet20_${x}/CIFAR100/disjoint
+done
 
 """
 
@@ -58,6 +61,21 @@ DATASET_STATS = {
     },
 }
 
+
+# add near the top (after imports are fine)
+def _setup_plotting_style() -> None:
+    # apply repo-wide style (rcParams) if your utils provides it
+    try:
+        utils.apply_stitching_trend_style()  # type: ignore[attr-defined]
+
+        # optional: also force the color cycle from your palette
+        if hasattr(utils, "get_deep_palette"):
+            palette = list(utils.get_deep_palette())  # type: ignore[attr-defined]
+            if palette:
+                from cycler import cycler
+                plt.rcParams["axes.prop_cycle"] = cycler(color=palette)
+    except Exception as e:
+        print(f"[WARN] Could not apply plotting style from utils: {e}")
 
 def _strip_module_prefix(state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     # Handles DDP checkpoints that prefix keys with "module."
@@ -138,7 +156,7 @@ def eval_loss_acc(
     return total_loss / max(1, total_seen), total_correct / max(1, total_seen)
 
 
-def plot_interp_loss(epoch_label, lambdas, train_loss_naive, test_loss_naive, train_loss_perm, test_loss_perm):
+def plot_interp_loss(epoch_label, lambdas, train_loss_naive, test_loss_naive, train_loss_perm, test_loss_perm, width_multiplier):
     fig = plt.figure()
     ax = fig.add_subplot(111)
     ax.plot(lambdas, train_loss_naive, linestyle="dashed", alpha=0.5, linewidth=2, label="Train, naïve interp.")
@@ -149,7 +167,7 @@ def plot_interp_loss(epoch_label, lambdas, train_loss_naive, test_loss_naive, tr
     ax.set_xticks([0, 1])
     ax.set_xticklabels(["Model A", "Model B"])
     ax.set_ylabel("Loss")
-    ax.set_title(f"Loss landscape between the two models ({epoch_label})")
+    ax.set_title(f"Loss Barrier : width {width_multiplier}")
     ax.legend(loc="upper right", framealpha=0.5)
     fig.tight_layout()
     return fig
@@ -195,6 +213,7 @@ def main():
     parser.add_argument("--out-dir", type=str, default="./weight_matching_out")
     parser.add_argument("--silent", action="store_true")
     args = parser.parse_args()
+    _setup_plotting_style()
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = utils.get_device()
@@ -313,7 +332,7 @@ def main():
 
     epoch_label = f"{Path(args.ckpt_a).name} vs {Path(args.ckpt_b).name}"
 
-    fig = plot_interp_loss(epoch_label, lambdas, train_loss_naive, test_loss_naive, train_loss_perm, test_loss_perm)
+    fig = plot_interp_loss(epoch_label, lambdas, train_loss_naive, test_loss_naive, train_loss_perm, test_loss_perm, int(args.width_multiplier))
     loss_path = os.path.join(args.out_dir, "interp_loss.png")
     fig.savefig(loss_path, dpi=300)
     plt.close(fig)

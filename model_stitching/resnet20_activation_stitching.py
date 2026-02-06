@@ -19,7 +19,7 @@ where pwd is the root
 HOW TO RUN :
 python model_stitching/resnet20_activation_stitching.py \
   --dataset CIFAR10 \
-  --runs-root ./runs_resnet20_1 \
+  --runs-root ./runs_resnet20_32 \
   --regime disjoint \
   --base-seed 0 \
   --which best \
@@ -55,6 +55,32 @@ from model_stitching.activation_permutation_stitching import (
     normalize_state_dict_keys,
     to_device,
 )
+
+from pathlib import Path
+import sys
+import matplotlib.pyplot as plt
+
+def _setup_plotting_style() -> list[str]:
+    # Ensure repo root is importable (removes the need for PYTHONPATH=$(pwd))
+    repo_root = Path(__file__).resolve().parents[1]  # repo_root/model_stitching/this_file.py
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    try:
+        import utils  # your repo's utils.py
+        utils.apply_stitching_trend_style()          # sets rcParams / style
+        palette = list(utils.get_deep_palette())     # list of colors
+
+        # If your style function doesn't already set the prop_cycle, do it here.
+        if palette:
+            from cycler import cycler
+            plt.rcParams["axes.prop_cycle"] = cycler(color=palette)
+
+        return palette
+    except Exception as e:
+        print(f"[WARN] Could not apply utils plotting style: {e}")
+        return []
+
 
 # ------------------------
 # eval
@@ -340,10 +366,10 @@ def main() -> None:
 
     p.add_argument("--match-split", type=str, default="train_eval",
                    choices=["train_eval", "subset_A_eval", "subset_B_eval", "val", "test"])
-    p.add_argument("--match-samples", type=int, default=10000, help="<=0 means full split.")
+    p.add_argument("--match-samples", type=int, default=512, help="<=0 means full split.")
 
     p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--eval-samples", type=int, default=0, help="<=0 means full dataset.")
 
     p.add_argument("--do-interp", action="store_true")
@@ -361,6 +387,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = _device_from_utils_fallback()
+    _setup_plotting_style()
 
     # ds_root structure matches train_resnet.py outputs :contentReference[oaicite:11]{index=11}
     ds_root = Path(args.runs_root) / args.dataset / args.regime
