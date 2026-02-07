@@ -22,18 +22,17 @@ Notes on permutation convention:
 
 
 HOW TO USE IT:
+export PYTHONPATH="$(pwd)"
 python compare_permutations.py \
-  --act-perm path/to/activation/permutations.pt \
-  --wgt-perm path/to/weight/permutation_seed0.pkl \
-  --out-json path/to/perm_compare_report.json
-
-WITH OPTIONAL CKA:
-python compare_permutations.py \
-  --act-perm ... --wgt-perm ... \
+  --act-perm path/to/act_perm.pt \
+  --wgt-perm path/to/wm_perm.pkl \
   --features-a path/to/features_A.pt \
   --features-b path/to/features_B.pt \
-  --unit-dim 1
-  
+  --unit-dim 1 \
+  --state-a path/to/ckpt_A.pth \
+  --state-b path/to/ckpt_B.pth \
+  --shortcut-option C \
+  --out-json out/report.json
 """
 
 from __future__ import annotations
@@ -47,6 +46,12 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+from linear_mode_connectivity.weight_matching_torch import (
+    resnet20_layernorm_permutation_spec,
+    apply_permutation,
+)
 
 
 # -------------------------
@@ -155,6 +160,112 @@ def load_permutations(path: str) -> Dict[str, torch.Tensor]:
     raw = _load_any(path)
     payload = _extract_perm_payload(raw, path)
     return _normalize_perm_dict(payload, path)
+
+# Other helpers :
+
+def _frob(x: torch.Tensor) -> float:
+    return float(torch.linalg.norm(x).item())
+
+def dW_for_perm_key(
+    *,
+    perm_key: str,
+    ps,
+    state_a: Dict[str, torch.Tensor],
+    state_b_perm: Dict[str, torch.Tensor],
+) -> Dict[str, float]:
+    # all params whose axes mention perm_key
+    if perm_key not in ps.perm_to_axes:
+        return {"raw_frob": float("nan"), "rel_to_A": float("nan"), "num_params": 0}
+
+    param_names = sorted({wk for (wk, _axis) in ps.perm_to_axes[perm_key]})
+    num = 0
+    ssq = 0.0
+    ssqA = 0.0
+    for name in param_names:
+        if name not in state_a or name not in state_b_perm:
+            continue
+        da = state_a[name].float()
+        db = state_b_perm[name].float()
+        diff = da - db
+        ssq += float((diff * diff).sum().item())
+        ssqA += float((da * da).sum().item())
+        num += 1
+
+    raw = float(ssq ** 0.5)
+    rel = raw / ((ssqA ** 0.5) + 1e-12)
+    return {"raw_frob": raw, "rel_to_A": rel, "num_params": num}
+
+# helpers for shortcut C in resnet20
+
+_RE_STRIDE2 = re.compile(r"^layer([23])\.0\.(conv1|shortcut\.0)\.weight$")
+
+def infer_conv_stride(name: str) -> int:
+    return 2 if _RE_STRIDE2.match(name) else 1
+
+def infer_conv_padding(weight: torch.Tensor) -> int:
+    # works for 3x3 (pad=1), 1x1 (pad=0), etc.
+    kh = int(weight.shape[-2])
+    kw = int(weight.shape[-1])
+    return kh // 2  # assumes odd kernels used here
+
+_P_INNER = re.compile(r"^P_layer(\d+)_(\d+)_inner$")
+def resnet_preprocess_for_perm(perm_name: str, x: torch.Tensor) -> torch.Tensor:
+    # matches your activation-stitching mapping: ReLU applied for P_bg0 and inner perms :contentReference[oaicite:9]{index=9}
+    if perm_name == "P_bg0" or _P_INNER.match(perm_name):
+        return F.relu(x)
+    return x
+
+def rcom_for_output_perm(
+    *,
+    out_perm: str,
+    ps,
+    state_a: Dict[str, torch.Tensor],
+    state_b_perm: Dict[str, torch.Tensor],
+    feats_a: Dict[str, torch.Tensor],
+    feats_b: Dict[str, torch.Tensor],
+    perm_dict: Dict[str, torch.Tensor],  # the SAME dict used to build state_b_perm
+) -> Dict[str, float]:
+    # sum over conv weights whose output-axis perm == out_perm
+    ssq = 0.0
+    count = 0
+
+    for wname, axes_perms in ps.axes_to_perm.items():
+        if wname not in state_a or wname not in state_b_perm:
+            continue
+        Wa = state_a[wname]
+        if Wa.ndim != 4 or not wname.endswith(".weight"):
+            continue  # conv weights only
+
+        p_out, p_in, _, _ = axes_perms  # conv spec is (p_out, p_in, None, None) :contentReference[oaicite:10]{index=10}
+        if p_out != out_perm or p_in is None:
+            continue
+
+        # Need input activations keyed by the *input* permutation name
+        if p_in not in feats_a or p_in not in feats_b or p_in not in perm_dict:
+            continue
+
+        Ha = feats_a[p_in].float()
+        Hb = feats_b[p_in].float()
+
+        # Optional preprocess to match your permutation computation convention
+        Ha = resnet_preprocess_for_perm(p_in, Ha)
+        Hb = resnet_preprocess_for_perm(p_in, Hb)
+
+        # Align B channels into A indexing
+        Hb_aligned = Hb.index_select(1, perm_dict[p_in])
+
+        dH = Ha - Hb_aligned  # [N,C,H,W]
+        dW = state_a[wname].float() - state_b_perm[wname].float()  # [Cout,Cin,kh,kw]
+
+        stride = infer_conv_stride(wname)
+        pad = infer_conv_padding(dW)
+
+        out = F.conv2d(dH, dW, bias=None, stride=stride, padding=pad)
+        ssq += float((out * out).sum().item())
+        count += 1
+
+    raw = float(ssq ** 0.5)
+    return {"raw_frob": raw, "num_convs": count}
 
 
 # -------------------------
@@ -295,6 +406,101 @@ def load_features(path: str) -> Dict[str, torch.Tensor]:
         out[str(k)] = v.detach().cpu()
     return out
 
+# -------------------------
+# Optional: state-dict + LLFC-style distance metrics
+# -------------------------
+_PREFIXES = ("module.", "model.", "net.")
+_FC_W_RE = re.compile(r"^fc(\d+)\.weight$")
+
+def load_state_dict_any(path: str) -> Dict[str, torch.Tensor]:
+    obj = _load_any(path)
+    if isinstance(obj, dict) and "state_dict" in obj and isinstance(obj["state_dict"], dict):
+        obj = obj["state_dict"]
+    if not isinstance(obj, dict):
+        raise ValueError(f"Expected dict-like state_dict in {path}, got {type(obj)}")
+
+    # strip common prefixes
+    state = {str(k): v for k, v in obj.items()}
+    for pref in ("module.", "model.", "net."):
+        if state and all(k.startswith(pref) for k in state.keys()):
+            state = {k[len(pref):]: v for k, v in state.items()}
+
+    out: Dict[str, torch.Tensor] = {}
+    for k, v in state.items():
+        if not isinstance(v, torch.Tensor):
+            v = torch.tensor(v)
+        out[k] = v.detach().cpu()
+    return out
+
+def parse_layer_index(key: str) -> Optional[int]:
+    # supports "1" or "P1" (your reconcile_keys already converts between them)
+    if key.isdigit():
+        return int(key)
+    m = _P_INT.match(key)
+    if m:
+        return int(m.group(1))
+    # optional extra patterns (harmless if unused)
+    m = re.match(r"^relu(\d+)$", key)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"^fc(\d+)$", key)
+    if m:
+        return int(m.group(1))
+    return None
+
+def frob(x: torch.Tensor) -> float:
+    return float(torch.linalg.norm(x).item())
+
+def activation_alignment_error(xa2: torch.Tensor, xb2: torch.Tensor, p: torch.Tensor) -> Dict[str, float]:
+    # xa2, xb2: [M, d], p: [d] with p[i]=j (A->B). Align B into A-order via xb2[:, p].
+    diff = xa2 - xb2[:, p]
+    raw = frob(diff)
+    rel = raw / (frob(xa2) + 1e-12)
+    return {"raw_frob": raw, "rel_to_A": rel}
+
+def weight_alignment_error(
+    Wa: torch.Tensor,
+    Wb: torch.Tensor,
+    p_out: Optional[torch.Tensor],
+    p_in: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    # Wa,Wb: [d_out, d_in]. p_out permutes rows, p_in permutes cols (both A->B, so select by p).
+    Wb_aligned = Wb
+    if p_out is not None:
+        Wb_aligned = Wb_aligned.index_select(0, p_out.to(dtype=torch.long))
+    if p_in is not None:
+        Wb_aligned = Wb_aligned.index_select(1, p_in.to(dtype=torch.long))
+    diff = Wa - Wb_aligned
+    raw = frob(diff)
+    rel = raw / (frob(Wa) + 1e-12)
+    return {"raw_frob": raw, "rel_to_A": rel}
+
+def commutativity_residual(
+    Wa: torch.Tensor,
+    Wb: torch.Tensor,
+    Ha_prev_2d: torch.Tensor,
+    Hb_prev_2d: torch.Tensor,
+    p_out: Optional[torch.Tensor],
+    p_in: Optional[torch.Tensor],
+    p_prev: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    # Build aligned Wb (rows by p_out, cols by p_in)
+    Wb_aligned = Wb
+    if p_out is not None:
+        Wb_aligned = Wb_aligned.index_select(0, p_out.to(dtype=torch.long))
+    if p_in is not None:
+        Wb_aligned = Wb_aligned.index_select(1, p_in.to(dtype=torch.long))
+    dW = Wa - Wb_aligned  # [d_out, d_in]
+
+    # Align prev activations into A-order with p_prev (units are columns)
+    Hb_aligned = Hb_prev_2d if p_prev is None else Hb_prev_2d[:, p_prev]
+    dH = Ha_prev_2d - Hb_aligned  # [M, d_in]
+
+    # Equivalent to || (dW)(dH^T) ||_F, but we compute (dH)(dW^T): [M,d_out]
+    prod = dH.matmul(dW.t())
+    raw = frob(prod)
+    norm = (frob(dW) * frob(dH)) + 1e-12
+    return {"raw_frob": raw, "normalized": raw / norm}
 
 # -------------------------
 # Main
@@ -315,6 +521,12 @@ def main():
                     help="Optional: path to saved B features dict[layer_key -> tensor].")
     ap.add_argument("--unit-dim", type=int, default=1,
                     help="Feature dimension corresponding to units/channels (default 1).")
+    ap.add_argument("--state-a", type=str, default=None,
+                    help="Optional: checkpoint/state_dict for model A (.pth/.pt/.pkl). Needed for dW and r_com.")
+    ap.add_argument("--state-b", type=str, default=None,
+                    help="Optional: checkpoint/state_dict for model B (.pth/.pt/.pkl). Needed for dW and r_com.")
+    ap.add_argument("--shortcut-option", type=str, default="C", choices=["A", "B", "C"],
+                    help="ResNet shortcut option. (Spec auto-detects from state_dict, but keep for safety.)")
 
     args = ap.parse_args()
 
@@ -346,6 +558,32 @@ def main():
     feats_a = load_features(args.features_a) if do_cka else {}
     feats_b = load_features(args.features_b) if do_cka else {}
 
+    do_state = (args.state_a is not None) and (args.state_b is not None)
+    state_a = load_state_dict_any(args.state_a) if do_state else {}
+    state_b = load_state_dict_any(args.state_b) if do_state else {}
+
+    ps = None
+    b_wgt_perm = {}
+    b_act_perm = {}
+    if do_state:
+        # Build spec (handles LN param layout and shortcut params; detects presence of shortcut convs) :contentReference[oaicite:6]{index=6}
+        ps = resnet20_layernorm_permutation_spec(
+            shortcut_option=str(args.shortcut_option),
+            state_dict=state_a,
+        )
+
+        # Permute ALL B params into A-indexing under each permutation-set
+        b_wgt_perm = apply_permutation(ps, wgt, state_b)
+        b_act_perm = apply_permutation(ps, act, state_b)
+
+    # Map each perm-key to a layer index (so we can fetch prev layer)
+    key_to_idx = {k: parse_layer_index(k) for k in set(act.keys()).union(set(wgt.keys()))}
+    idx_to_key: Dict[int, str] = {}
+    for kk, ii in key_to_idx.items():
+        if ii is not None and ii not in idx_to_key:
+            idx_to_key[ii] = kk
+
+
     print(f"[INFO] common keys = {len(keys)} (reconcile={strat})")
 
     for k in keys:
@@ -375,6 +613,11 @@ def main():
             "fixed_point_fraction_of_Q": fixed,
             "cycle_summary_of_Q": cs,
         }
+        if do_state and ps is not None:
+            entry["dW_weight_alignment_error"] = {
+                "under_wgt_perm": dW_for_perm_key(perm_key=k, ps=ps, state_a=state_a, state_b_perm=b_wgt_perm),
+                "under_act_perm": dW_for_perm_key(perm_key=k, ps=ps, state_a=state_a, state_b_perm=b_act_perm),
+            }        
 
         # Optional CKA: compare A vs permuted-B representations under each permutation
         if do_cka:
@@ -393,6 +636,21 @@ def main():
                 else:
                     xb_wgt = xb[:, p_wgt]
                     xb_act = xb[:, p_act]
+                                        # d_H under each permutation (WM vs AM)
+                    dH_wgt = {
+                        "raw_frob": float(torch.linalg.norm(xa - xb_wgt).item()),
+                        "rel_to_A": float(torch.linalg.norm(xa - xb_wgt).item()) / (float(torch.linalg.norm(xa).item()) + 1e-12),
+                    }
+                    dH_act = {
+                        "raw_frob": float(torch.linalg.norm(xa - xb_act).item()),
+                        "rel_to_A": float(torch.linalg.norm(xa - xb_act).item()) / (float(torch.linalg.norm(xa).item()) + 1e-12),
+                    }
+                    entry["dH_activation_alignment_error"] = {
+                        "under_wgt_perm": dH_wgt,
+                        "under_act_perm": dH_act,
+                        "delta_act_minus_wgt_raw": dH_act["raw_frob"] - dH_wgt["raw_frob"],
+                        "delta_act_minus_wgt_rel": dH_act["rel_to_A"] - dH_wgt["rel_to_A"],
+                    }
                     cka_wgt = float(cka_fn(xa, xb_wgt).item())
                     cka_act = float(cka_fn(xa, xb_act).item())
                     entry["cka"] = {
@@ -407,6 +665,23 @@ def main():
             f"[{k}] n={entry['n']}  agree={agreement:.4f}  fixed(Q)={fixed:.4f}  "
             f"num_cycles={cs['num_cycles']}  max_cycle={cs['max_cycle']}  cayley={cs['cayley_distance']}"
         )
+
+        if do_state and ps is not None and do_cka:
+            # r_com under each permutation-set (WM vs AM), grouping by output perm key k
+            entry["r_com_commutativity_residual_conv"] = {
+                "under_wgt_perm": rcom_for_output_perm(
+                    out_perm=k, ps=ps,
+                    state_a=state_a, state_b_perm=b_wgt_perm,
+                    feats_a=feats_a, feats_b=feats_b,
+                    perm_dict=wgt,
+                ),
+                "under_act_perm": rcom_for_output_perm(
+                    out_perm=k, ps=ps,
+                    state_a=state_a, state_b_perm=b_act_perm,
+                    feats_a=feats_a, feats_b=feats_b,
+                    perm_dict=act,
+                ),
+            }
 
     if args.out_json:
         os.makedirs(os.path.dirname(os.path.abspath(args.out_json)), exist_ok=True)
