@@ -2,12 +2,15 @@
 """
 stitching_trend.py
 
-Folder layout:
-  activation_stitching_out_cifar10_resnet20_1/
-  activation_stitching_out_cifar10_resnet20_2/
-  activation_stitching_out_cifar10_resnet20_8/
-  activation_stitching_out_cifar10_resnet20_16/
-(each contains one or more results.json somewhere inside)
+Your layout (as in VSCode sidebar):
+  activation_out/
+    CIFAR10/
+      activation_stitching_out_cifar10_resnet20_1/  ... results.json
+      activation_stitching_out_cifar10_resnet20_2/  ... results.json
+      ...
+    CIFAR100/
+      activation_stitching_out_cifar100_resnet20_1/ ... results.json
+      ...
 
 Reads:
   stitching -> metrics -> test -> loss_perm
@@ -17,11 +20,17 @@ Outputs:
 2) (Optional) Plot: for each w, aggregate the cut-values (cuts 1..9),
    compute mean and std across cuts, and save the plot.
 
+Example:
+  # run from repo root, pick CIFAR100 under ./activation_out/CIFAR100
+  python stitching_trend.py --dataset CIFAR100 --plot
 
-HOW TO RUN:
-# table + plot saved to ./stitching_mean_std.png
-python stitching_trend.py --root . --plot   
-
+How to use:
+python stitching_trend.py --root . \
+    --activation-out activation_out \
+    --dataset CIFAR100 \
+    --plot \
+    --out overall_plots/disjoint/stitching_mean_std_CIFAR100.png \
+    --verbose
 """
 
 from __future__ import annotations
@@ -79,7 +88,7 @@ def _to_int(x: Any) -> Optional[int]:
 def _extract_w_from_path(file_path: Path) -> Optional[int]:
     """
     Infer w from the right-most directory name that ends with _<int> or -<int>.
-    Example: activation_stitching_out_cifar10_resnet20_16 -> 16
+    Example: activation_stitching_out_cifar100_resnet20_16 -> 16
     """
     for part in reversed(file_path.parts[:-1]):  # exclude filename
         m = SUFFIX_INT_RE.search(part)
@@ -302,12 +311,83 @@ def _plot_mean_std_across_cuts(
     plt.close(fig)
 
 
+def _normalize_dataset_token(dataset: str) -> Tuple[str, str]:
+    """
+    Returns (token, canonical_name)
+      token: used for path filtering, e.g. "cifar100"
+      canonical_name: e.g. "CIFAR100"
+    """
+    s = dataset.strip()
+    s_low = s.lower().replace("-", "").replace("_", "")
+    if s_low in ("cifar10", "c10"):
+        return "cifar10", "CIFAR10"
+    if s_low in ("cifar100", "c100"):
+        return "cifar100", "CIFAR100"
+    # generic fallback
+    token = re.sub(r"[^a-z0-9]+", "", s.lower())
+    return token, s
+
+
+def _resolve_dataset_root(base: Path, dataset: str, activation_out: str) -> Tuple[Path, str]:
+    """
+    Prefer the explicit directory (base/activation_out/<DATASET>), but be robust:
+    - base might already be activation_out
+    - dataset folder could have different casing
+    Returns (search_root, token_for_filtering)
+    """
+    token, canon = _normalize_dataset_token(dataset)
+
+    candidates: List[Path] = []
+    # common "repo-root" case
+    candidates += [
+        base / activation_out / canon,
+        base / activation_out / canon.upper(),
+        base / activation_out / canon.lower(),
+        base / activation_out / dataset,
+    ]
+    # if base already points at activation_out, or user points base somewhere else
+    candidates += [
+        base / canon,
+        base / canon.upper(),
+        base / canon.lower(),
+        base / dataset,
+    ]
+
+    for p in candidates:
+        if p.is_dir():
+            return p, token
+
+    # last-resort: check immediate children of base and base/activation_out for a matching folder name
+    for parent in [base, base / activation_out]:
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if not child.is_dir():
+                continue
+            child_token = re.sub(r"[^a-z0-9]+", "", child.name.lower())
+            if child_token == re.sub(r"[^a-z0-9]+", "", canon.lower()):
+                return child, token
+
+    # not found: fall back to base, but still return token so we can filter results.json paths
+    return base, token
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--root",
         default=".",
-        help="Root directory that contains activation_stitching_out_* folders (default: current directory).",
+        help="Base directory (typically repo root). With --dataset, the script will look under ./activation_out/<DATASET>/ by default.",
+    )
+    ap.add_argument(
+        "--dataset",
+        default=None,
+        help='Dataset selector (e.g. "CIFAR100" or "CIFAR10"). If provided, the script focuses on that dataset folder.',
+    )
+    ap.add_argument(
+        "--activation-out",
+        default="activation_out",
+        help='Name of the activation output directory (default: "activation_out").',
     )
     ap.add_argument(
         "--w-keys",
@@ -323,20 +403,40 @@ def main() -> int:
         default="stitching_mean_std.png",
         help="Output path for plot (default: stitching_mean_std.png).",
     )
-    ap.add_argument(
-        "--title",
-        default=None,
-        help="Optional plot title.",
-    )
+    ap.add_argument("--title", default=None, help="Optional plot title.")
 
     args = ap.parse_args()
 
-    root = Path(args.root).expanduser().resolve()
+    base = Path(args.root).expanduser().resolve()
     w_keys = [s.strip() for s in args.w_keys.split(",") if s.strip()]
 
-    files = _iter_results_json_files(root)
+    token = None
+    search_root = base
+    if args.dataset:
+        search_root, token = _resolve_dataset_root(base, args.dataset, args.activation_out)
+
+    files = _iter_results_json_files(search_root)
+
+    # If we couldn't resolve the dataset directory, still try to filter by token (path contains cifar100/cifar10, etc.)
+    if args.dataset and token:
+        files = [fp for fp in files if token in str(fp).lower()]
+
+    if args.verbose:
+        print(f"[INFO] Base:        {base}", file=sys.stderr)
+        if args.dataset:
+            print(f"[INFO] Dataset:     {args.dataset}", file=sys.stderr)
+            print(f"[INFO] Search root: {search_root}", file=sys.stderr)
+            if token:
+                print(f"[INFO] Path token:  {token}", file=sys.stderr)
+        print(f"[INFO] Found {len(files)} results.json files", file=sys.stderr)
+
     if not files:
-        print(f"No results.json found under: {root}", file=sys.stderr)
+        print(f"No results.json found under: {search_root}", file=sys.stderr)
+        if args.dataset:
+            print(
+                f"(and none matched dataset token in paths: {token})",
+                file=sys.stderr,
+            )
         return 2
 
     # raw samples per (w, cut)
