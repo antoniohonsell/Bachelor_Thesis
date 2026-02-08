@@ -23,14 +23,16 @@ Notes on permutation convention:
 
 HOW TO USE IT:
 export PYTHONPATH="$(pwd)"
-python compare_permutations.py \
-  --act-perm activation_out/CIFAR10/activation_stitching_out_cifar10_resnet20_16/permutations.json \
-  --wgt-perm weight_matching_out/resnet20_16/CIFAR10/disjoint/permutation_seed0.pkl \
-  --unit-dim 1 \
-  --state-a runs_resnet20_16/CIFAR10/disjoint/seed_0/subset_A/resnet20_CIFAR10_seed0_subsetA_best.pth \
-  --state-b runs_resnet20_16/CIFAR10/disjoint/seed_0/subset_B/resnet20_CIFAR10_seed0_subsetB_best.pth\
-  --shortcut-option C \
-  --out-json out/report.json
+for x in 1 2 8 16 ; do
+    python compare_permutations.py \
+    --act-perm activation_out/CIFAR100/activation_stitching_out_cifar100_resnet20_${x}/permutations.json \
+    --wgt-perm weight_matching_out/resnet20_${x}/CIFAR100/disjoint/permutation_seed0.pkl \
+    --unit-dim 1 \
+    --state-a runs_resnet20_${x}/CIFAR100/disjoint/seed_0/subset_A/resnet20_CIFAR100_seed0_subsetA_best.pth \
+    --state-b runs_resnet20_${x}/CIFAR100/disjoint/seed_0/subset_B/resnet20_CIFAR100_seed0_subsetB_best.pth\
+    --shortcut-option C \
+    --out-json out/CIFAR100/disjoint/report_${x}.json
+    done 
 """
 
 from __future__ import annotations
@@ -729,6 +731,9 @@ def main():
 
     act = load_permutations(args.act_perm)
     wgt = load_permutations(args.wgt_perm)
+    # if it is inverted 
+    # wgt = {k: invert_perm(v) for k, v in wgt.items()}
+    # act = {k: invert_perm(v) for k, v in act.items()}
 
     act, wgt, strat = reconcile_keys(act, wgt)
 
