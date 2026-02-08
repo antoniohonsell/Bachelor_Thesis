@@ -24,13 +24,11 @@ Notes on permutation convention:
 HOW TO USE IT:
 export PYTHONPATH="$(pwd)"
 python compare_permutations.py \
-  --act-perm path/to/act_perm.pt \
-  --wgt-perm path/to/wm_perm.pkl \
-  --features-a path/to/features_A.pt \
-  --features-b path/to/features_B.pt \
+  --act-perm activation_out/CIFAR10/activation_stitching_out_cifar10_resnet20_16/permutations.json \
+  --wgt-perm weight_matching_out/resnet20_16/CIFAR10/disjoint/permutation_seed0.pkl \
   --unit-dim 1 \
-  --state-a path/to/ckpt_A.pth \
-  --state-b path/to/ckpt_B.pth \
+  --state-a runs_resnet20_16/CIFAR10/disjoint/seed_0/subset_A/resnet20_CIFAR10_seed0_subsetA_best.pth \
+  --state-b runs_resnet20_16/CIFAR10/disjoint/seed_0/subset_B/resnet20_CIFAR10_seed0_subsetB_best.pth\
   --shortcut-option C \
   --out-json out/report.json
 """
@@ -53,6 +51,17 @@ from linear_mode_connectivity.weight_matching_torch import (
     apply_permutation,
 )
 
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+import architectures
+import train_resnet
+
+from model_stitching.resnet20_activation_stitching import (
+    infer_width_multiplier_from_state,
+    infer_shortcut_option_from_state,
+    perm_name_to_hook,
+)
 
 # -------------------------
 # Optional: import CKA from "elsewhere"
@@ -502,6 +511,180 @@ def commutativity_residual(
     norm = (frob(dW) * frob(dH)) + 1e-12
     return {"raw_frob": raw, "normalized": raw / norm}
 
+# helpers for computing features from state dicts # -------------------------
+# ResNet20-LN: infer width/shortcut + map perm-name -> hook layer (copied from resnet20_activation_stitching.py)
+# -------------------------
+
+# def infer_width_multiplier_from_state(state: Dict[str, torch.Tensor]) -> int:
+#     # conv1 out_channels = 16 * width_multiplier  (same heuristic as stitching script)
+#     w = int(state["conv1.weight"].shape[0] // 16)
+#     if w <= 0:
+#         raise ValueError("Could not infer width_multiplier from conv1.weight")
+#     return w
+
+# def infer_shortcut_option_from_state(state: Dict[str, torch.Tensor]) -> str:
+#     # If shortcut conv exists, you’re in B/C-style shortcut (your script returns "C" in that case)
+#     return "C" if any(k.endswith("shortcut.0.weight") for k in state.keys()) else "A"
+
+_P_INNER_HOOK = re.compile(r"^P_layer(\d+)_(\d+)_inner$")
+
+# def perm_name_to_hook(perm_name: str) -> Tuple[str, Optional[Any], int]:
+#     """
+#     Returns: (layer_name_to_hook, preprocess_fn, unit_dim)
+#     Matches resnet20_activation_stitching.perm_name_to_hook() :contentReference[oaicite:3]{index=3}
+#     """
+#     if perm_name == "P_bg0":
+#         return "n1", torch.relu, 1
+#     if perm_name == "P_bg1":
+#         return "layer2.0", None, 1
+#     if perm_name == "P_bg2":
+#         return "layer3.0", None, 1
+#     m = _P_INNER_HOOK.match(perm_name)
+#     if m:
+#         layer = int(m.group(1))
+#         block = int(m.group(2))
+#         return f"layer{layer}.{block}.n1", torch.relu, 1
+#     raise KeyError(f"Don't know how to map perm name to hook layer: {perm_name}")
+
+def _get_submodule_by_name(model: nn.Module, name: str) -> nn.Module:
+    """
+    Supports dotted paths like:
+      - "n1"
+      - "layer2.0"
+      - "layer3.1.n1"
+    """
+    cur: nn.Module = model
+    for part in name.split("."):
+        if part.isdigit():
+            idx = int(part)
+            # Sequential / ModuleList support
+            if isinstance(cur, (nn.Sequential, nn.ModuleList)):
+                cur = cur[idx]
+            else:
+                cur = getattr(cur, part)  # fallback
+        else:
+            cur = getattr(cur, part)
+    return cur
+
+@torch.no_grad()
+def compute_features_from_state_dicts(
+    *,
+    dataset: str,
+    data_root: str,
+    split: str,
+    samples: int,
+    batch_size: int,
+    num_workers: int,
+    state_a: Dict[str, torch.Tensor],
+    state_b: Dict[str, torch.Tensor],
+    ps,  # permutation spec
+    shortcut_option: str,
+    width_multiplier: Optional[int],
+    device: torch.device,
+    features_dtype: torch.dtype,
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """
+    Builds model A/B, loads weights, runs one forward pass over the chosen split,
+    and records activations for every perm-key in ps.perm_to_axes.
+    """
+    if dataset not in train_resnet.DATASET_STATS:
+        raise ValueError(f"Unsupported dataset: {dataset}")
+
+    # datasets: train_full has augmentation; eval_full + test have only normalization
+    train_full, eval_full, test_ds, _targets = train_resnet.load_cifar_datasets(dataset, data_root)  # :contentReference[oaicite:4]{index=4}
+
+    if split == "test":
+        ds = test_ds
+    elif split == "train_eval":
+        ds = eval_full
+    else:
+        raise ValueError(f"Unsupported split for features: {split} (use 'test' or 'train_eval')")
+
+    if samples is not None and samples > 0 and samples < len(ds):
+        ds = Subset(ds, list(range(int(samples))))
+
+    loader = DataLoader(
+        ds,
+        batch_size=int(batch_size),
+        shuffle=False,
+        num_workers=int(num_workers),
+        pin_memory=(device.type == "cuda"),
+    )
+
+    num_classes = int(train_resnet.DATASET_STATS[dataset]["num_classes"])  # :contentReference[oaicite:5]{index=5}
+
+    if width_multiplier is None:
+        width_multiplier = infer_width_multiplier_from_state(state_a)
+
+    # Build models exactly like training/stitching does :contentReference[oaicite:6]{index=6}
+    model_a = architectures.build_model(
+        "resnet20",
+        num_classes=num_classes,
+        norm="flax_ln",
+        width_multiplier=int(width_multiplier),
+        shortcut_option=str(shortcut_option),
+    ).to(device).eval()
+
+    model_b = architectures.build_model(
+        "resnet20",
+        num_classes=num_classes,
+        norm="flax_ln",
+        width_multiplier=int(width_multiplier),
+        shortcut_option=str(shortcut_option),
+    ).to(device).eval()
+
+    # Filter checkpoint dicts to exact model keys (prevents strict-load surprises)
+    keys = set(model_a.state_dict().keys())
+    state_a_f = {k: v for k, v in state_a.items() if k in keys}
+    state_b_f = {k: v for k, v in state_b.items() if k in keys}
+    model_a.load_state_dict(state_a_f, strict=True)
+    model_b.load_state_dict(state_b_f, strict=True)
+
+    perm_names = sorted(ps.perm_to_axes.keys())
+
+    def _extract(model: nn.Module) -> Dict[str, torch.Tensor]:
+        store: Dict[str, List[torch.Tensor]] = {p: [] for p in perm_names}
+        hooks = []
+
+        for p in perm_names:
+            layer_name, preprocess, _unit_dim = perm_name_to_hook(p)
+            mod = _get_submodule_by_name(model, layer_name)
+
+            def _make_hook(pname: str, pre):
+                def _hook(_m, _inp, out):
+                    x = out.detach()
+                    if pre is not None:
+                        x = pre(x)
+                    store[pname].append(x.to(device="cpu", dtype=features_dtype))
+                return _hook
+
+            hooks.append(mod.register_forward_hook(_make_hook(p, preprocess)))
+
+        seen = 0
+        for xb, _yb in loader:
+            xb = xb.to(device, non_blocking=True)
+            _ = model(xb)
+            seen += int(xb.shape[0])
+            if samples is not None and samples > 0 and seen >= samples:
+                break
+
+        for h in hooks:
+            h.remove()
+
+        out_feats: Dict[str, torch.Tensor] = {}
+        for p in perm_names:
+            if len(store[p]) == 0:
+                continue
+            t = torch.cat(store[p], dim=0)
+            if samples is not None and samples > 0 and t.shape[0] > samples:
+                t = t[:samples]
+            out_feats[p] = t
+        return out_feats
+
+    feats_a = _extract(model_a)
+    feats_b = _extract(model_b)
+    return feats_a, feats_b
+
 # -------------------------
 # Main
 # -------------------------
@@ -527,6 +710,20 @@ def main():
                     help="Optional: checkpoint/state_dict for model B (.pth/.pt/.pkl). Needed for dW and r_com.")
     ap.add_argument("--shortcut-option", type=str, default="C", choices=["A", "B", "C"],
                     help="ResNet shortcut option. (Spec auto-detects from state_dict, but keep for safety.)")
+    # If provided, compute features internally (so you can omit --features-a/--features-b)
+    ap.add_argument("--dataset", type=str, default=None, choices=["CIFAR10", "CIFAR100"],
+                    help="If set (and --state-a/--state-b are set), compute features on the fly.")
+    ap.add_argument("--data-root", type=str, default="./data",
+                    help="Root for torchvision CIFAR downloads (same as train_resnet).")
+    ap.add_argument("--features-split", type=str, default="test", choices=["test", "train_eval"],
+                    help="Which split to use for feature extraction.")
+    ap.add_argument("--features-samples", type=int, default=512,
+                    help="How many samples to use for features (<=0 means full split).")
+    ap.add_argument("--features-batch-size", type=int, default=256)
+    ap.add_argument("--features-num-workers", type=int, default=0)
+    ap.add_argument("--features-dtype", type=str, default="float16", choices=["float16", "float32"])
+    ap.add_argument("--width-multiplier", type=int, default=None,
+                    help="Override inferred width multiplier (otherwise inferred from conv1.weight).")
 
     args = ap.parse_args()
 
@@ -552,11 +749,19 @@ def main():
         "per_key": {},
     }
 
-    # Optional CKA
-    do_cka = (args.features_a is not None) and (args.features_b is not None)
-    cka_fn = _load_cka_fn() if do_cka else None
-    feats_a = load_features(args.features_a) if do_cka else {}
-    feats_b = load_features(args.features_b) if do_cka else {}
+    # ---- features / CKA source ----
+    feats_a: Dict[str, torch.Tensor] = {}
+    feats_b: Dict[str, torch.Tensor] = {}
+
+    have_feat_files = (args.features_a is not None) and (args.features_b is not None)
+    do_cka = False
+    cka_fn = None
+
+    if have_feat_files:
+        do_cka = True
+        cka_fn = _load_cka_fn()
+        feats_a = load_features(args.features_a)
+        feats_b = load_features(args.features_b)
 
     do_state = (args.state_a is not None) and (args.state_b is not None)
     state_a = load_state_dict_any(args.state_a) if do_state else {}
@@ -575,6 +780,34 @@ def main():
         # Permute ALL B params into A-indexing under each permutation-set
         b_wgt_perm = apply_permutation(ps, wgt, state_b)
         b_act_perm = apply_permutation(ps, act, state_b)
+                # If user asked for dataset-based features, compute them now (no need for --features-a/--features-b)
+        if (args.dataset is not None) and (not have_feat_files):
+            do_cka = True
+            cka_fn = _load_cka_fn()
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            dtype = torch.float16 if args.features_dtype == "float16" else torch.float32
+            n_samp = int(args.features_samples)
+            n_samp = n_samp if n_samp > 0 else 0  # 0 => full
+
+            # shortcut option: use CLI if you want, but you can also infer from the checkpoint
+            shortcut_opt = str(args.shortcut_option) if args.shortcut_option else infer_shortcut_option_from_state(state_a)
+
+            feats_a, feats_b = compute_features_from_state_dicts(
+                dataset=str(args.dataset),
+                data_root=str(args.data_root),
+                split=str(args.features_split),
+                samples=n_samp,
+                batch_size=int(args.features_batch_size),
+                num_workers=int(args.features_num_workers),
+                state_a=state_a,
+                state_b=state_b,
+                ps=ps,
+                shortcut_option=shortcut_opt,
+                width_multiplier=int(args.width_multiplier) if args.width_multiplier is not None else None,
+                device=device,
+                features_dtype=dtype,
+            )
 
     # Map each perm-key to a layer index (so we can fetch prev layer)
     key_to_idx = {k: parse_layer_index(k) for k in set(act.keys()).union(set(wgt.keys()))}
