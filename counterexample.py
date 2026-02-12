@@ -1,18 +1,61 @@
+#!/usr/bin/env python3
+
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
 import math
-import copy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
-from utils import get_device
+from torch.utils.data import DataLoader, TensorDataset
 
 
 # -----------------------------
-# Data + model (same as before)
+# Device helpers (MPS default)
 # -----------------------------
-def make_strict_dataset(n: int, seed: int = 0, device: str = "cpu"):
-    g = torch.Generator(device=device)
+def get_default_device_mps_first() -> torch.device:
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def parse_device(s: str) -> torch.device:
+    s = s.strip().lower()
+    if s in ("auto", "default"):
+        return get_default_device_mps_first()
+    if s in ("mps", "cuda", "cpu"):
+        return torch.device(s)
+    raise ValueError(f"Unknown device '{s}'. Use one of: auto|mps|cuda|cpu")
+
+
+def seed_torch_for_init(seed: int) -> None:
+    # Seeds CPU RNG; CUDA is additionally seeded if present.
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# -----------------------------
+# Data + model
+# -----------------------------
+def make_strict_dataset_cpu(n: int, seed: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Deterministic dataset generation on CPU only (MPS-safe).
+
+    Returns CPU tensors (x, y). Move to device later.
+    """
+    g = torch.Generator(device="cpu")
     g.manual_seed(seed)
-    x = (2.0 * torch.rand((n, 2), generator=g, device=device)) - 1.0
+
+    x = (2.0 * torch.rand((n, 2), generator=g, device="cpu")) - 1.0
     y = ((x[:, 0] < 0.0) & (x[:, 1] > 0.0)).float().unsqueeze(1)
     return x, y
 
@@ -22,7 +65,7 @@ class MLP2x2(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(2, 2, bias=True)
         self.fc2 = nn.Linear(2, 2, bias=True)
-        self.fc3 = nn.Linear(2, 1, bias=True)
+        self.fc3 = nn.Linear(2, 1, bias=False)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -30,7 +73,7 @@ class MLP2x2(nn.Module):
         return self.fc3(x)  # logits
 
 
-def set_manual_params(model: nn.Module, params: dict):
+def set_manual_params(model: nn.Module, params: Dict[str, Any]) -> None:
     with torch.no_grad():
         for name, tensor in model.named_parameters():
             if name not in params:
@@ -49,60 +92,49 @@ def accuracy_on(model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> float:
     return (preds.eq(y)).float().mean().item()
 
 
-def print_weights_and_biases(model: nn.Module, decimals: int = 6):
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            arr = p.detach().cpu().numpy()
-            if arr.ndim == 1:
-                s = ", ".join([f"{v:.{decimals}f}" for v in arr.tolist()])
-                print(f"{name} = [{s}]")
-            else:
-                print(f"{name} =")
-                for row in arr:
-                    s = ", ".join([f"{v:.{decimals}f}" for v in row.tolist()])
-                    print(f"  [{s}]")
-
-
 # -----------------------------------------
 # Training with explicit SGD "randomness"
 # -----------------------------------------
 def train_sgd_seeded(
     *,
-    # dataset controls (kept fixed across runs if you want)
     n_samples: int = 8192,
     data_seed: int = 0,
     val_frac: float = 0.2,
-    device: str = "cpu",
-    # optimization controls
+    device: torch.device,
     epochs: int = 300,
     lr: float = 0.1,
     batch_size: int = 256,
-    sgd_seed: int = 0,          # controls init + minibatch order + any stochasticity
-    # optional "strict" init
-    strict_init_params: dict | None = None,
-):
-    # Fix dataset (same x,y every time for a given data_seed)
-    x, y = make_strict_dataset(n_samples, seed=data_seed, device=device)
+    sgd_seed: int = 0,
+    strict_init_params: Optional[Dict[str, Any]] = None,
+) -> Tuple[nn.Module, Dict[str, List[float]]]:
+    # Fix dataset on CPU (MPS-safe deterministic RNG)
+    x_cpu, y_cpu = make_strict_dataset_cpu(n_samples, seed=data_seed)
 
     # Train/val split (deterministic)
     n_val = int(math.floor(n_samples * val_frac))
-    x_val, y_val = x[:n_val], y[:n_val]
-    x_tr, y_tr = x[n_val:], y[n_val:]
+    x_val_cpu, y_val_cpu = x_cpu[:n_val], y_cpu[:n_val]
+    x_tr_cpu, y_tr_cpu = x_cpu[n_val:], y_cpu[n_val:]
 
-    # Use a generator so DataLoader shuffling depends on sgd_seed (not global RNG)
-    g = torch.Generator(device=device)
+    x_tr = x_tr_cpu.to(device)
+    y_tr = y_tr_cpu.to(device)
+
+    # DataLoader shuffle generator MUST be CPU
+    g = torch.Generator(device="cpu")
     g.manual_seed(sgd_seed)
 
-    loader = DataLoader(
-        TensorDataset(x_tr, y_tr),
-        batch_size=batch_size,
-        shuffle=True,
-        generator=g,
-        drop_last=False,
-    )
 
-    # Seed global RNG for parameter init (and any other torch randomness)
-    torch.manual_seed(sgd_seed)
+    # loader = DataLoader(
+    #     TensorDataset(x_tr_cpu, y_tr_cpu),
+    #     batch_size=batch_size,
+    #     shuffle=True,
+    #     generator=g,
+    #     drop_last=False,
+    #     num_workers=0,
+    #     pin_memory=(device.type == "cuda"),
+    # )
+
+    # Seed parameter init (and any torch randomness)
+    seed_torch_for_init(sgd_seed)
 
     model = MLP2x2().to(device)
     if strict_init_params is not None:
@@ -111,13 +143,21 @@ def train_sgd_seeded(
     opt = torch.optim.SGD(model.parameters(), lr=lr)
     loss_fn = nn.BCEWithLogitsLoss()
 
+    # Keep val tensors on device for fast evaluation
+    x_val = x_val_cpu.to(device)
+    y_val = y_val_cpu.to(device)
+
     hist = {"train_loss": [], "val_acc": []}
 
     for _ in range(epochs):
         model.train()
         total_loss, total = 0.0, 0
+        perm = torch.randperm(x_tr.size(0), generator=g, device="cpu").to(device) 
+        for i in range(0, x_tr.size(0), batch_size):
+            idx = perm[i:i+batch_size]
+            xb = x_tr[idx]
+            yb = y_tr[idx]
 
-        for xb, yb in loader:
             opt.zero_grad(set_to_none=True)
             logits = model(xb)
             loss = loss_fn(logits, yb)
@@ -134,21 +174,33 @@ def train_sgd_seeded(
     return model, hist
 
 
+@dataclass
+class TuneBest:
+    lr: float
+    final_val_acc: float
+    peak_val_acc: float
+    final_train_loss: float
+    sgd_seed: int
+    data_seed: int
+
+
 def tune_learning_rate_for_seed(
-    lr_grid,
+    lr_grid: Iterable[float],
     *,
-    epochs: int = 300,
-    batch_size: int = 256,
-    n_samples: int = 8192,
-    data_seed: int = 0,
-    val_frac: float = 0.2,
-    sgd_seed: int = 0,
-    device: str = "cpu",
-    strict_init_params: dict | None = None,
+    epochs: int,
+    batch_size: int,
+    n_samples: int,
+    data_seed: int,
+    val_frac: float,
+    sgd_seed: int,
+    device: torch.device,
+    strict_init_params: Optional[Dict[str, Any]] = None,
     criterion: str = "best_val_acc",  # or "best_val_acc_peak"
-):
-    results = []
-    best_lr, best_score, best_model = None, None, None
+) -> Tuple[TuneBest, List[Dict[str, float]], nn.Module]:
+    results: List[Dict[str, float]] = []
+    best_score: Optional[float] = None
+    best_model: Optional[nn.Module] = None
+    best_best: Optional[TuneBest] = None
 
     for lr in lr_grid:
         model, hist = train_sgd_seeded(
@@ -163,9 +215,9 @@ def tune_learning_rate_for_seed(
             strict_init_params=strict_init_params,
         )
 
-        final_val = hist["val_acc"][-1]
-        peak_val = max(hist["val_acc"])
-        final_loss = hist["train_loss"][-1]
+        final_val = float(hist["val_acc"][-1])
+        peak_val = float(max(hist["val_acc"]))
+        final_loss = float(hist["train_loss"][-1])
 
         if criterion == "best_val_acc":
             score = final_val
@@ -174,16 +226,15 @@ def tune_learning_rate_for_seed(
         else:
             raise ValueError(f"Unknown criterion: {criterion}")
 
-        results.append(
-            {
-                "lr": float(lr),
-                "final_val_acc": float(final_val),
-                "peak_val_acc": float(peak_val),
-                "final_train_loss": float(final_loss),
-                "sgd_seed": int(sgd_seed),
-                "data_seed": int(data_seed),
-            }
-        )
+        row = {
+            "lr": float(lr),
+            "final_val_acc": final_val,
+            "peak_val_acc": peak_val,
+            "final_train_loss": final_loss,
+            "sgd_seed": float(sgd_seed),
+            "data_seed": float(data_seed),
+        }
+        results.append(row)
 
         print(
             f"[sgd_seed={sgd_seed}] lr={lr:.6g} | final_val_acc={final_val:.4f} "
@@ -192,33 +243,36 @@ def tune_learning_rate_for_seed(
 
         if best_score is None or score > best_score:
             best_score = score
-            best_lr = float(lr)
             best_model = model
+            best_best = TuneBest(
+                lr=float(lr),
+                final_val_acc=final_val,
+                peak_val_acc=peak_val,
+                final_train_loss=final_loss,
+                sgd_seed=int(sgd_seed),
+                data_seed=int(data_seed),
+            )
 
+    assert best_model is not None and best_best is not None
     results_sorted = sorted(results, key=lambda d: d["final_val_acc"], reverse=True)
-    return best_lr, results_sorted, best_model
+    return best_best, results_sorted, best_model
 
 
-# ----------------------------------------------------
-# Two disjoint models (different SGD seeds) + LR tuning
-# ----------------------------------------------------
 def train_two_disjoint_models_with_lr_tuning(
-    lr_grid,
+    lr_grid: Iterable[float],
     *,
     sgd_seed_a: int,
     sgd_seed_b: int,
-    # keep dataset fixed for both models unless you want otherwise
-    data_seed: int = 0,
-    n_samples: int = 8192,
-    val_frac: float = 0.2,
-    # training
-    epochs: int = 300,
-    batch_size: int = 256,
-    device: str = "cpu",
-    strict_init_params: dict | None = None,
+    data_seed: int,
+    n_samples: int,
+    val_frac: float,
+    epochs: int,
+    batch_size: int,
+    device: torch.device,
+    strict_init_params: Optional[Dict[str, Any]] = None,
     criterion: str = "best_val_acc",
-):
-    best_lr_a, res_a, model_a = tune_learning_rate_for_seed(
+) -> Tuple[Tuple[nn.Module, TuneBest, List[Dict[str, float]]], Tuple[nn.Module, TuneBest, List[Dict[str, float]]]]:
+    best_a, res_a, model_a = tune_learning_rate_for_seed(
         lr_grid,
         epochs=epochs,
         batch_size=batch_size,
@@ -231,7 +285,7 @@ def train_two_disjoint_models_with_lr_tuning(
         criterion=criterion,
     )
 
-    best_lr_b, res_b, model_b = tune_learning_rate_for_seed(
+    best_b, res_b, model_b = tune_learning_rate_for_seed(
         lr_grid,
         epochs=epochs,
         batch_size=batch_size,
@@ -244,41 +298,116 @@ def train_two_disjoint_models_with_lr_tuning(
         criterion=criterion,
     )
 
-    summary = {
-        "model_a": {"sgd_seed": sgd_seed_a, "best_lr": best_lr_a, "results": res_a},
-        "model_b": {"sgd_seed": sgd_seed_b, "best_lr": best_lr_b, "results": res_b},
+    return (model_a, best_a, res_a), (model_b, best_b, res_b)
+
+
+# -----------------------------
+# Table export (CSV)
+# -----------------------------
+def tensor_to_json_cell(t: torch.Tensor) -> str:
+    return json.dumps(t.detach().cpu().tolist())
+
+
+def model_to_table_row(
+    *,
+    trial_index: int,
+    label: str,
+    best: TuneBest,
+    model: nn.Module,
+) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "trial": int(trial_index),
+        "label": str(label),
+        "sgd_seed": int(best.sgd_seed),
+        "best_lr": float(best.lr),
+        "final_val_acc": float(best.final_val_acc),
+        "peak_val_acc": float(best.peak_val_acc),
+        "final_train_loss": float(best.final_train_loss),
     }
-    return (model_a, summary["model_a"]), (model_b, summary["model_b"]), summary
+    for name, p in model.named_parameters():
+        row[name] = tensor_to_json_cell(p)
+    return row
 
 
-# -----------------------
-# Example usage
-# -----------------------
-if __name__ == "__main__":
-    STRICT_INIT = None  
+def write_csv_table(path: Path, rows: List[Dict[str, Any]], param_names: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    lr_grid = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1]
+    base_cols = ["trial", "label", "sgd_seed", "best_lr", "final_val_acc", "peak_val_acc", "final_train_loss"]
+    fieldnames = base_cols + param_names
 
-    (model_a, info_a), (model_b, info_b), summary = train_two_disjoint_models_with_lr_tuning(
-        lr_grid,
-        sgd_seed_a=0,
-        sgd_seed_b=1,   
-        data_seed=0,      
-        n_samples=8192,
-        val_frac=0.2,
-        epochs=500,
-        batch_size=256,
-        device="cpu",
-        strict_init_params=STRICT_INIT,
-        criterion="best_val_acc",
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="mps", help="auto|mps|cuda|cpu (auto = MPS-first)")
+    parser.add_argument("--num_trials", type=int, default=20)
+    parser.add_argument("--seed_start", type=int, default=0)
+    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--n_samples", type=int, default=8192)
+    parser.add_argument("--val_frac", type=float, default=0.2)
+    parser.add_argument("--data_seed", type=int, default=0)
+    parser.add_argument(
+        "--criterion",
+        type=str,
+        default="best_val_acc",
+        choices=["best_val_acc", "best_val_acc_peak"],
     )
+    parser.add_argument(
+        "--lr_grid",
+        type=float,
+        nargs="+",
+        default=[1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1],
+    )
+    parser.add_argument("--out_csv", type=str, default="counterexample_params_table.csv")
+    args = parser.parse_args()
 
-    print("\n=== Best LRs ===")
-    print(f"Model A (sgd_seed={info_a['sgd_seed']}): best_lr={info_a['best_lr']}")
-    print(f"Model B (sgd_seed={info_b['sgd_seed']}): best_lr={info_b['best_lr']}")
+    device = parse_device(args.device)
+    print(f"Using device: {device}")
 
-    print("\n=== Model A parameters ===")
-    print_weights_and_biases(model_a)
+    # Stable parameter column ordering from a fresh model
+    template = MLP2x2()
+    param_names = [name for name, _ in template.named_parameters()]
 
-    print("\n=== Model B parameters ===")
-    print_weights_and_biases(model_b)
+    rows: List[Dict[str, Any]] = []
+
+    # 20 trials; each trial trains TWO networks with distinct SGD seeds
+    for t in range(int(args.num_trials)):
+        base = int(args.seed_start) + t
+        seed_a = 2 * base
+        seed_b = 2 * base + 1
+
+        print(f"\n=== Trial {t}/{args.num_trials - 1} | seeds: A={seed_a}, B={seed_b} ===")
+
+        (model_a, best_a, _res_a), (model_b, best_b, _res_b) = train_two_disjoint_models_with_lr_tuning(
+            args.lr_grid,
+            sgd_seed_a=seed_a,
+            sgd_seed_b=seed_b,
+            data_seed=int(args.data_seed),
+            n_samples=int(args.n_samples),
+            val_frac=float(args.val_frac),
+            epochs=int(args.epochs),
+            batch_size=int(args.batch_size),
+            device=device,
+            strict_init_params=None,
+            criterion=str(args.criterion),
+        )
+
+        rows.append(model_to_table_row(trial_index=t, label="A", best=best_a, model=model_a))
+        rows.append(model_to_table_row(trial_index=t, label="B", best=best_b, model=model_b))
+
+    out_csv = Path(args.out_csv)
+    write_csv_table(out_csv, rows, param_names)
+    print(f"\nSaved table with {len(rows)} networks to: {out_csv.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
