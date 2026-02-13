@@ -440,3 +440,47 @@ if __name__ == "__main__":
         print(f"{metric.rjust(20)}: {np.mean(scores):1.3f} [elapsed: {np.mean(times):.2f}s]")
 
     print(f'Total time: {time.time() - t0:.2f}s')
+
+
+
+def cosine_similarity_over_samples(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Per-sample cosine similarity between a and b.
+    a, b: tensors with shape [B, ...]
+    returns: [B]
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: a={tuple(a.shape)} b={tuple(b.shape)}")
+
+    a_flat = a.flatten(start_dim=1)
+    b_flat = b.flatten(start_dim=1)
+
+    dot = (a_flat * b_flat).sum(dim=1)
+    na = torch.sqrt((a_flat * a_flat).sum(dim=1).clamp_min(eps))
+    nb = torch.sqrt((b_flat * b_flat).sum(dim=1).clamp_min(eps))
+    return dot / (na * nb).clamp_min(eps)
+
+
+def cosine_similarity(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Dataset / batch-aggregated cosine similarity.
+    a, b: tensors with shape [B, ...]
+    returns: scalar tensor
+    """
+    return cosine_similarity_over_samples(a, b, eps=eps).mean()
+
+
+def best_scalar_coef(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Per-sample least-squares scalar coef that best fits: a ≈ coef * b
+    returns: [B]
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: a={tuple(a.shape)} b={tuple(b.shape)}")
+
+    a_flat = a.flatten(start_dim=1)
+    b_flat = b.flatten(start_dim=1)
+
+    dot = (a_flat * b_flat).sum(dim=1)
+    denom = (b_flat * b_flat).sum(dim=1).clamp_min(eps)
+    return dot / denom
