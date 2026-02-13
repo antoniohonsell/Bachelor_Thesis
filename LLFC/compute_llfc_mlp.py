@@ -243,10 +243,10 @@ def main():
     if build_model is None:
         raise ImportError("Could not import build_model. Edit the import near the top of this file.")
 
-    # Build models
-    model_a = build_model(args.arch)
-    model_b = build_model(args.arch)
-    model_l = build_model(args.arch)
+    # MNIST / FashionMNIST are 10-way classification
+    model_a = build_model(args.arch, num_classes=10, input_shape=(1, 28, 28), hidden=512)
+    model_b = build_model(args.arch, num_classes=10, input_shape=(1, 28, 28), hidden=512)
+    model_l = build_model(args.arch, num_classes=10, input_shape=(1, 28, 28), hidden=512)
 
     sd_a = load_state_dict(args.ckpt_a)
     sd_b = load_state_dict(args.ckpt_b)
