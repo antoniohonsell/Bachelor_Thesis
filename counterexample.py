@@ -102,7 +102,11 @@ def train_sgd_seeded(
     val_frac: float = 0.2,
     device: torch.device,
     epochs: int = 300,
+    optimizer : str = "SGD",
     lr: float = 0.1,
+    adam_betas=(0.9, 0.999), 
+    adam_eps= 1e-8, 
+    weight_decay=0.0,
     batch_size: int = 256,
     sgd_seed: int = 0,
     strict_init_params: Optional[Dict[str, Any]] = None,
@@ -140,7 +144,26 @@ def train_sgd_seeded(
     if strict_init_params is not None:
         set_manual_params(model, strict_init_params)
 
-    opt = torch.optim.SGD(model.parameters(), lr=lr)
+    if optimizer=="SGD":
+        opt = torch.optim.SGD(model.parameters(), lr=lr)
+        
+    elif optimizer == "Adam":
+        opt = torch.optim.Adam(
+            model.parameters(),
+            lr=lr,
+            betas=adam_betas,
+            eps=adam_eps,
+            weight_decay=weight_decay,
+        )
+
+    elif optimizer == "AdamW":
+        opt = torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            betas=adam_betas,
+            eps=adam_eps,
+            weight_decay=weight_decay,
+        )
     loss_fn = nn.BCEWithLogitsLoss()
 
     # Keep val tensors on device for fast evaluation
@@ -192,6 +215,7 @@ def tune_learning_rate_for_seed(
     n_samples: int,
     data_seed: int,
     val_frac: float,
+    optimizer: str,
     sgd_seed: int,
     device: torch.device,
     strict_init_params: Optional[Dict[str, Any]] = None,
@@ -266,6 +290,7 @@ def train_two_disjoint_models_with_lr_tuning(
     data_seed: int,
     n_samples: int,
     val_frac: float,
+    optimizer: str,
     epochs: int,
     batch_size: int,
     device: torch.device,
@@ -281,6 +306,7 @@ def train_two_disjoint_models_with_lr_tuning(
         val_frac=val_frac,
         sgd_seed=sgd_seed_a,
         device=device,
+        optimizer=optimizer,
         strict_init_params=strict_init_params,
         criterion=criterion,
     )
@@ -293,9 +319,11 @@ def train_two_disjoint_models_with_lr_tuning(
         data_seed=data_seed,
         val_frac=val_frac,
         sgd_seed=sgd_seed_b,
+        optimizer=optimizer,
         device=device,
         strict_init_params=strict_init_params,
         criterion=criterion,
+        OPTIMIZER=optimizer,
     )
 
     return (model_a, best_a, res_a), (model_b, best_b, res_b)
@@ -365,9 +393,10 @@ def main() -> None:
         "--lr_grid",
         type=float,
         nargs="+",
-        default=[1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1],
+        default= [1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
     )
-    parser.add_argument("--out_csv", type=str, default="counterexample_params_table.csv")
+    parser.add_argument("--out_csv", type=str, default="counterexample_params_table_Adam.csv")
+    parser.add_argument("--optimizer", type=str, default="SGD", choices=["SGD","Adam","AdamW"])
     args = parser.parse_args()
 
     device = parse_device(args.device)
@@ -395,6 +424,7 @@ def main() -> None:
             n_samples=int(args.n_samples),
             val_frac=float(args.val_frac),
             epochs=int(args.epochs),
+            optimizer=str(args.optimizer),
             batch_size=int(args.batch_size),
             device=device,
             strict_init_params=None,
