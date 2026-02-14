@@ -12,18 +12,32 @@ Supports:
 - CIFAR10 / CIFAR100
 - MLP + ResNet20 (incl. LayerNorm2d / "flax_ln") + different widths (width_multiplier)
 
-
-TO RUN (mio):
+TO RUN MLP:
 export PYTHONPATH="$(pwd)"
+
 python LLFC/compute_llfc.py \
-  --dataset CIFAR100 \
-  --arch resnet20 \
-  --norm flax_ln \
-  --width_multiplier 1 \
-  --shortcut_option C \
-  --ckpt_a runs_resnet20_1/CIFAR100/disjoint/seed_0/subset_A/resnet20_CIFAR100_seed0_subsetA_best.pth \
-  --ckpt_b runs_resnet20_1/CIFAR100/disjoint/seed_0/subset_B/resnet20_CIFAR100_seed0_subsetB_best.pth \
-  --out runs/llfc_resnet20_ln_cifar100_w1
+--dataset MNIST \
+--arch mlp \
+--ckpt_a runs_mlp/MNIST/disjoint/seed_0/subset_A/MLP_MNIST_subsetA_seed0_best.pth \
+--ckpt_b runs_mlp/MNIST/disjoint/seed_0/subset_B/MLP_MNIST_subsetB_seed0_best.pth \
+--out runs/llfc_mlp_MNIST
+
+
+
+TO RUN ResNet:
+export PYTHONPATH="$(pwd)"
+for w in 32; do
+    python LLFC/compute_llfc.py \
+    --dataset CIFAR100 \
+    --arch resnet20 \
+    --norm flax_ln \
+    --width_multiplier $w \
+    --shortcut_option C \
+    --device mps \
+    --ckpt_a runs_resnet20_$w/CIFAR100/disjoint/seed_0/subset_A/resnet20_CIFAR100_seed0_subsetA_best.pth \
+    --ckpt_b runs_resnet20_$w/CIFAR100/disjoint/seed_0/subset_B/resnet20_CIFAR100_seed0_subsetB_best.pth \
+    --out runs/llfc_resnet20_ln_cifar100_w$w
+done
 
 Notes:
 - architectures.build_model(name, num_classes=..., ...) is expected to exist.
@@ -139,6 +153,23 @@ def interpolate_state_dict(a: TensorDict, b: TensorDict, lam: float) -> TensorDi
         else:
             out[k] = va
     return out
+
+def interpolate_model_inplace_(model_l: torch.nn.Module,
+                              sd_a_dev: dict[str, torch.Tensor],
+                              sd_b_dev: dict[str, torch.Tensor],
+                              lam: float) -> None:
+    sd_l = model_l.state_dict()  # tensors reference module storage
+    one_minus = 1.0 - lam
+    with torch.no_grad():
+        for k, dst in sd_l.items():
+            a = sd_a_dev[k]
+            b = sd_b_dev[k]
+            if dst.dtype.is_floating_point:
+                dst.copy_(a)
+                dst.mul_(one_minus)
+                dst.add_(b, alpha=lam)
+            else:
+                dst.copy_(a)
 
 
 # ---------------------------
@@ -339,7 +370,7 @@ def forward_collect(model: nn.Module, hooks: HookCollector, x: torch.Tensor, fla
 # ---------------------------
 # LLFC computation
 # ---------------------------
-@torch.no_grad()
+#@torch.no_grad()
 def compute_llfc_over_lambdas(
     *,
     model_a: nn.Module,
@@ -355,81 +386,92 @@ def compute_llfc_over_lambdas(
     max_batches: int,
     eps: float,
 ) -> Dict[str, torch.Tensor]:
-    hooks_a = HookCollector.for_module_names(model_a, hook_names)
-    hooks_b = HookCollector.for_module_names(model_b, hook_names)
-    hooks_l = HookCollector.for_module_names(model_l, hook_names)
+    with torch.inference_mode():
+        hooks_a = HookCollector.for_module_names(model_a, hook_names)
+        hooks_b = HookCollector.for_module_names(model_b, hook_names)
+        hooks_l = HookCollector.for_module_names(model_l, hook_names)
 
-    n_layers = len(hook_names)
-    n_lams = len(lambdas)
+        n_layers = len(hook_names)
+        n_lams = len(lambdas)
 
-    cos_mean = torch.zeros(n_layers, n_lams, dtype=torch.float64)
-    cos_std = torch.zeros(n_layers, n_lams, dtype=torch.float64)
-    coef_mean = torch.zeros(n_layers, n_lams, dtype=torch.float64)
+        cos_mean = torch.zeros(n_layers, n_lams, dtype=torch.float64)
+        cos_std = torch.zeros(n_layers, n_lams, dtype=torch.float64)
+        coef_mean = torch.zeros(n_layers, n_lams, dtype=torch.float64)
 
-    try:
-        for j, lam in enumerate(lambdas):
-            sd_l = interpolate_state_dict(sd_a, sd_b, lam)
-            model_l.load_state_dict(sd_l, strict=True)
+        sd_a_dev = {k: v.detach() for k, v in model_a.state_dict().items()}
+        sd_b_dev = {k: v.detach() for k, v in model_b.state_dict().items()}
+        try:
             model_l.eval()
+            for j, lam in enumerate(lambdas):
+                interpolate_model_inplace_(model_l, sd_a_dev, sd_b_dev, lam)
+                
 
-            sum_cos = torch.zeros(n_layers, dtype=torch.float64)
-            sum_cos2 = torch.zeros(n_layers, dtype=torch.float64)
-            sum_coef = torch.zeros(n_layers, dtype=torch.float64)
-            n_total = 0
+                sum_cos = torch.zeros(n_layers, device=device, dtype=torch.float32)
+                sum_cos2 = torch.zeros(n_layers, device=device, dtype=torch.float32)
+                sum_coef = torch.zeros(n_layers, device=device, dtype=torch.float32)
+                n_total = 0
 
-            for bi, (x, _y) in enumerate(loader):
-                if max_batches > 0 and bi >= max_batches:
-                    break
-                x = x.to(device, non_blocking=True)
-                bs = int(x.size(0))
-                n_total += bs
+                for bi, (x, _y) in enumerate(loader):
+                    if max_batches > 0 and bi >= max_batches:
+                        break
+                    x = x.to(device, non_blocking=True)
+                    bs = int(x.size(0))
+                    n_total += bs
 
-                feats_a = forward_collect(model_a, hooks_a, x, flatten_input=flatten_input)
-                feats_b = forward_collect(model_b, hooks_b, x, flatten_input=flatten_input)
-                feats_l = forward_collect(model_l, hooks_l, x, flatten_input=flatten_input)
+                    feats_a = forward_collect(model_a, hooks_a, x, flatten_input=flatten_input)
+                    feats_b = forward_collect(model_b, hooks_b, x, flatten_input=flatten_input)
+                    feats_l = forward_collect(model_l, hooks_l, x, flatten_input=flatten_input)
 
-                for li, lname in enumerate(hook_names):
-                    ha = feats_a[lname]
-                    hb = feats_b[lname]
-                    hl = feats_l[lname]
+                    for li, lname in enumerate(hook_names):
+                        ha = feats_a[lname]
+                        hb = feats_b[lname]
+                        hl = feats_l[lname]
 
-                    hint = (1.0 - lam) * ha + lam * hb
+                        hint = (1.0 - lam) * ha + lam * hb
 
-                    cos = cosine_similarity_over_samples(hl, hint, eps=eps).to(torch.float64)  # [B]
-                    coef = best_scalar_coef(hl, hint, eps=eps).to(torch.float64)               # [B]
+                        hl_f   = hl.flatten(start_dim=1)
+                        hint_f = hint.flatten(start_dim=1)
 
-                    sum_cos[li] += cos.sum()
-                    sum_cos2[li] += (cos * cos).sum()
-                    sum_coef[li] += coef.mean() * bs
+                        dot  = (hl_f * hint_f).sum(dim=1)
+                        hl2  = (hl_f * hl_f).sum(dim=1).clamp_min(eps)
+                        hi2  = (hint_f * hint_f).sum(dim=1).clamp_min(eps)
 
-            denom = max(n_total, 1)
-            mean = sum_cos / denom
-            var = (sum_cos2 / denom) - mean * mean
-            std = torch.sqrt(torch.clamp(var, min=0.0))
+                        cos  = dot / (torch.sqrt(hl2 * hi2).clamp_min(eps))
+                        coef = dot / hi2              # [B]
 
-            cos_mean[:, j] = mean
-            cos_std[:, j] = std
-            coef_mean[:, j] = sum_coef / denom
+                        sum_cos[li] += cos.sum()
+                        sum_cos2[li] += (cos * cos).sum()
+                        sum_coef[li] += coef.sum()
 
-            print(f"[LLFC] lambda={lam:.3f} done ({n_total} samples)")
+                denom = max(n_total, 1)
+                mean = sum_cos / denom
+                var = (sum_cos2 / denom) - mean * mean
+                std = torch.sqrt(torch.clamp(var, min=0.0))
 
-    finally:
-        hooks_a.remove()
-        hooks_b.remove()
-        hooks_l.remove()
+                # move once per lambda
+                cos_mean[:, j]  = mean.detach().cpu().double()
+                cos_std[:, j]   = std.detach().cpu().double()
+                coef_mean[:, j] = (sum_coef / denom).detach().cpu().double()
 
-    cos_mean_layeravg = cos_mean.mean(dim=0)
-    cos_std_layeravg = torch.sqrt(torch.clamp((cos_std ** 2).mean(dim=0), min=0.0))
+                print(f"[LLFC] lambda={lam:.3f} done ({n_total} samples)")
 
-    return {
-        "layers": hook_names,
-        "lambdas": torch.tensor(lambdas, dtype=torch.float64),
-        "cos_mean": cos_mean,
-        "cos_std": cos_std,
-        "coef_mean": coef_mean,
-        "cos_mean_layeravg": cos_mean_layeravg,
-        "cos_std_layeravg": cos_std_layeravg,
-    }
+        finally:
+            hooks_a.remove()
+            hooks_b.remove()
+            hooks_l.remove()
+
+        cos_mean_layeravg = cos_mean.mean(dim=0)
+        cos_std_layeravg = torch.sqrt(torch.clamp((cos_std ** 2).mean(dim=0), min=0.0))
+
+        return {
+            "layers": hook_names,
+            "lambdas": torch.tensor(lambdas, dtype=torch.float64),
+            "cos_mean": cos_mean,
+            "cos_std": cos_std,
+            "coef_mean": coef_mean,
+            "cos_mean_layeravg": cos_mean_layeravg,
+            "cos_std_layeravg": cos_std_layeravg,
+        }
 
 
 # ---------------------------
@@ -454,11 +496,11 @@ def main() -> None:
     p.add_argument("--mlp_hidden", type=int, default=512, help="Used for arch=mlp/lightnet where applicable")
 
     # Runtime knobs
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--num_workers", type=int, default=2)
+    p.add_argument("--batch_size", type=int, default=512)
+    p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
-    p.add_argument("--lambdas", type=int, default=21, help="Number of lambda points in [0,1]")
+    p.add_argument("--lambdas", type=int, default=9, help="Number of lambda points in [0,1]")
     p.add_argument("--max_batches", type=int, default=0, help="0 = full test set; else limit number of batches")
     p.add_argument("--eps", type=float, default=1e-12)
 
